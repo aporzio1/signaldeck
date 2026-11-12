@@ -1,0 +1,19 @@
+{
+  "name": "signaldeck-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SignalDeck backend: web console for the HackerGadgets RTL-SDR / LoRa / GPS / RTC HAT",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  }
+}

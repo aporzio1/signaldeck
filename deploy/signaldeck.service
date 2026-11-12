@@ -1,0 +1,30 @@
+[Unit]
+Description=SignalDeck — web console for the RTL-SDR / LoRa / GPS / RTC HAT
+Documentation=https://github.com/aporzio1/signaldeck
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=/opt/signaldeck
+Environment=NODE_ENV=production
+Environment=SIGNALDECK_ROOT=/opt/signaldeck
+Environment=SIGNALDECK_DATA_DIR=/opt/signaldeck/data
+ExecStart=/usr/bin/node /opt/signaldeck/server/src/index.js
+Restart=always
+RestartSec=3
+TimeoutStopSec=8
+KillSignal=SIGTERM
+
+# Hardening (kept compatible with sudo-based service/clock control)
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/signaldeck/data /tmp
+NoNewPrivileges=false
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target
