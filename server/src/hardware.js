@@ -23,7 +23,14 @@ export async function readBootConfig() {
   return { path: file, text: (await readText(file, 256 * 1024)) || '' };
 }
 
-const hasLine = (text, needle) => text.split('\n').some((line) => line.trim() === needle || line.trim().startsWith(`${needle},`));
+const hasLine = (text, needle) =>
+  text.split('\n').some((raw) => {
+    // Ignore inline comments so lines this tool itself wrote
+    // (`dtparam=spi=on  # SX1262 LoRa radio`) count as present instead of
+    // being appended again on every apply.
+    const line = raw.split('#')[0].trim();
+    return line === needle || line.startsWith(`${needle},`);
+  });
 
 export const REQUIRED_LINES = [
   { key: 'spi', line: 'dtparam=spi=on', label: 'SPI bus', why: 'SX1262 LoRa radio' },
@@ -174,17 +181,25 @@ export async function setRail(pin, on) {
 export async function applyBootConfig(keys) {
   const file = await configPath();
   if (!file) throw Object.assign(new Error('No /boot/firmware/config.txt found.'), { status: 400 });
-  const text = (await readText(file, 256 * 1024)) || '';
+  // A read failure or an oversized file previously degraded to '' and the
+  // generated lines replaced the user's entire boot config below. Fail closed.
+  const text = await readText(file, 256 * 1024);
+  if (text === null) {
+    throw Object.assign(new Error(`Could not read ${file}; refusing to overwrite it.`), { status: 500 });
+  }
   const wanted = REQUIRED_LINES.filter((item) => !keys?.length || keys.includes(item.key));
   const missing = wanted.filter((item) => !hasLine(text, item.line));
   if (!missing.length) return { changed: false, path: file, added: [] };
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const backup = `${file}.signaldeck-${stamp}.bak`;
-  await run('sudo', ['-n', 'cp', file, backup], { timeout: 8000 });
+  const backedUp = await run('sudo', ['-n', 'cp', file, backup], { timeout: 8000 });
+  if (!backedUp.ok) {
+    throw Object.assign(new Error(backedUp.stderr || 'Backup of the boot config failed; refusing to write without one.'), { status: 500 });
+  }
   const addition = `\n# SignalDeck: HackerGadgets RTL-SDR/LoRa/GPS/RTC HAT\n${missing.map((m) => `${m.line}  # ${m.why}`).join('\n')}\n`;
 
-  const tmp = `/tmp/signaldeck-config-${process.pid}.txt`;
+  const tmp = `/tmp/signaldeck-config-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`;
   await fs.promises.writeFile(tmp, text.replace(/\s*$/, '\n') + addition);
   const res = await run('sudo', ['-n', 'cp', tmp, file], { timeout: 8000 });
   await fs.promises.unlink(tmp).catch(() => {});
@@ -212,10 +227,14 @@ export async function writeMeshtasticdConfig(text, restart = false) {
   await run('sudo', ['-n', 'mkdir', '-p', dir], { timeout: 6000 });
   const existing = await run('sudo', ['-n', 'test', '-f', file], { timeout: 5000 });
   if (existing.ok) {
-    await run('sudo', ['-n', 'cp', file, `${file}.signaldeck-${stamp}.bak`], { timeout: 8000 });
+    const backup = `${file}.signaldeck-${stamp}.bak`;
+    const backedUp = await run('sudo', ['-n', 'cp', file, backup], { timeout: 8000 });
+    if (!backedUp.ok) {
+      throw Object.assign(new Error('Backup of the existing meshtasticd config failed; refusing to overwrite it.'), { status: 500 });
+    }
   }
 
-  const tmp = `/tmp/signaldeck-meshtasticd-${process.pid}.yaml`;
+  const tmp = `/tmp/signaldeck-meshtasticd-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.yaml`;
   await fs.promises.writeFile(tmp, text, { mode: 0o644 });
   const copied = await run('sudo', ['-n', 'cp', tmp, file], { timeout: 8000 });
   await fs.promises.unlink(tmp).catch(() => {});

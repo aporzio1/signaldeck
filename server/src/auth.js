@@ -164,6 +164,28 @@ export function requireSameOrigin(req, res, next) {
   return next();
 }
 
+/**
+ * Long-running service hygiene: sessions and login-attempt buckets were only
+ * collected on their own key's next use, so both Maps grew for the process
+ * lifetime. Prune expired entries on a timer and bound both Maps by evicting
+ * the oldest insertions (Map iteration order is insertion order).
+ */
+const SESSION_CAP = 1000;
+const ATTEMPT_CAP = 1000;
+function pruneAuthState() {
+  const now = Date.now();
+  for (const [token, session] of sessions) {
+    if (now - session.created > SESSION_TTL) sessions.delete(token);
+  }
+  for (const [ip, entry] of loginAttempts) {
+    if (now - entry.first > 15 * 60 * 1000) loginAttempts.delete(ip);
+  }
+  while (sessions.size > SESSION_CAP) sessions.delete(sessions.keys().next().value);
+  while (loginAttempts.size > ATTEMPT_CAP) loginAttempts.delete(loginAttempts.keys().next().value);
+}
+const authPrune = setInterval(pruneAuthState, 60_000);
+authPrune.unref?.();
+
 export function sessionCount() {
   return sessions.size;
 }

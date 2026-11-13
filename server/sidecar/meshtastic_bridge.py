@@ -202,8 +202,19 @@ def main():
         except Exception:
             log("connection handler error: " + traceback.format_exc(limit=2), "error")
 
-    def on_lost(interface=None, topic=None):
+    def on_lost(iface=None, topic=None):
+        # The pubsub argument is the lost TCPInterface and shadowed the shared
+        # state dict, so the ready flag never flipped and the loop kept a dead
+        # iface forever. Publish the lost interface as disconnected and release
+        # it so the main loop can reconnect.
+        old = interface.get("iface")
+        interface["iface"] = None
         interface["ready"] = False
+        if old is not None and old is not iface:
+            try:
+                old.close()
+            except Exception:
+                pass
         emit({"type": "error", "message": "Connection to meshtasticd lost."})
 
     pub.subscribe(on_receive, "meshtastic.receive")
@@ -214,17 +225,19 @@ def main():
     stdin_thread = threading.Thread(target=stdin_loop, args=(commands,), daemon=True)
     stdin_thread.start()
 
-    iface = None
+    # The shared dict is the single source of truth for the connection: the
+    # connection/lost callbacks set and clear it, and a stale local variable
+    # used to keep the loop from ever reconnecting after a daemon restart.
     last_attempt = 0
     while True:
-        if iface is None and time.time() - last_attempt > 5:
+        if interface["iface"] is None and time.time() - last_attempt > 5:
             last_attempt = time.time()
             try:
-                iface = meshtastic.tcp_interface.TCPInterface(
+                interface["iface"] = meshtastic.tcp_interface.TCPInterface(
                     hostname=args.host, portNumber=args.port, connectNow=True
                 )
             except Exception as exc:
-                iface = None
+                interface["iface"] = None
                 emit({"type": "error", "message": "Cannot reach meshtasticd at %s:%s (%s)" % (args.host, args.port, exc)})
 
         try:
@@ -233,7 +246,7 @@ def main():
             continue
         if request is None:
             break
-        handle(request, iface, interface, pub)
+        handle(request, interface["iface"], interface, pub)
 
 
 def stdin_loop(commands):
