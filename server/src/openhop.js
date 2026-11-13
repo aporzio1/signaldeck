@@ -70,10 +70,25 @@ function quote(value) {
  * regeneration never rotates the node's MeshCore identity or locks out the
  * remote CLI.
  */
+function repeaterSection(text) {
+  const lines = String(text).split('\n');
+  const start = lines.findIndex((line) => /^repeater\s*:/.test(line));
+  if (start === -1) return String(text);
+  const out = [lines[start]];
+  for (let i = start + 1; i < lines.length; i += 1) {
+    // Stop at the next top-level key so companion/room-server identities are
+    // never mistaken for the primary repeater identity.
+    if (/^[A-Za-z_][\w-]*\s*:/.test(lines[i])) break;
+    out.push(lines[i]);
+  }
+  return out.join('\n');
+}
+
 export function preservedConfig(text) {
   if (!text) return {};
+  const section = repeaterSection(text);
   const scalar = (key) => {
-    const match = new RegExp(`^[\\t ]*${key}:[\\t ]*(\\S.*)$`, 'm').exec(text);
+    const match = new RegExp(`^[\\t ]*${key}:[\\t ]*(\\S.*)$`, 'm').exec(section);
     const raw = match?.[1]?.trim();
     if (!raw || raw === 'null' || raw === '""' || raw === "''") return '';
     return raw;
@@ -247,6 +262,43 @@ async function probeNativeConfig() {
   };
 }
 
+/**
+ * Presence of the system identity file: 'present', 'absent' or 'unknown'.
+ * Callers must treat 'unknown' as a reason not to write, never as absent.
+ */
+export async function systemIdentityState() {
+  const file = '/etc/openhop_repeater/identity.key';
+  try {
+    const stat = await fsp.stat(file);
+    return stat.isFile() ? 'present' : 'unknown';
+  } catch (err) {
+    if (err?.code === 'ENOENT') return 'absent';
+    if (!isLinux) return 'unknown';
+    const res = await run('sudo', ['-n', 'test', '-f', file], { timeout: 5000 });
+    if (res.ok) return 'present';
+    if (res.code === 1 && !sudoCouldNotAnswer(res)) return 'absent';
+    return 'unknown';
+  }
+}
+
+/**
+ * A write may only proceed when it keeps the identity the current file uses.
+ * The check is deliberately textual: the key never leaves the file unless the
+ * caller copied it, and a missing/renamed reference means a new identity.
+ */
+export function carriesIdentityForward(existingText, nextText) {
+  const before = preservedConfig(existingText);
+  const after = preservedConfig(nextText);
+  if (before.identityKey) return after.identityKey === before.identityKey;
+  if (before.identityFile) {
+    // An inline key takes precedence over identity_file, so adding one here
+    // would silently replace the identity the file currently uses.
+    if (after.identityKey) return false;
+    return after.identityFile === before.identityFile;
+  }
+  return true;
+}
+
 export async function inspectNativeConfig({ fresh = false } = {}) {
   if (!fresh && configCache && Date.now() - configCache.at < CONFIG_CACHE_MS) return configCache.value;
   const value = await probeNativeConfig();
@@ -313,13 +365,68 @@ export async function nativeState(settings = getSettings(), options = {}) {
 
 /** Validate loosely, then install the config with a timestamped backup and a restart. */
 export async function writeNativeConfig(text, restart = false) {
-  if (!isLinux) throw Object.assign(new Error('Native MeshCore configuration requires Linux.'), { status: 400 });
   if (typeof text !== 'string' || text.length > 128 * 1024) {
     throw Object.assign(new Error('Configuration text is missing or too large.'), { status: 400 });
   }
   if (!/^repeater:/m.test(text)) throw Object.assign(new Error('The config must contain a repeater: section.'), { status: 400 });
   if (!/^radio_type:/m.test(text)) throw Object.assign(new Error('The config must define radio_type:.'), { status: 400 });
+  // Duplicate keys make YAML's effective identity differ from the one the
+  // check below reads, so reject them outright.
+  if ((text.match(/^repeater\s*:/gm) || []).length !== 1) {
+    throw Object.assign(new Error('The config must contain exactly one top-level repeater: section.'), { status: 400 });
+  }
+  const repeater = repeaterSection(text);
+  for (const key of ['identity_key', 'identity_file']) {
+    if ((repeater.match(new RegExp(`^[\\t ]*${key}\\s*:`, 'gm')) || []).length > 1) {
+      throw Object.assign(new Error(`The config defines ${key} more than once; refusing an ambiguous identity.`), { status: 400 });
+    }
+  }
 
+  // Every write goes through this gate, including manual config posts. It is
+  // the last line of defence against replacing an identity we cannot see.
+  const info = await inspectNativeConfig({ fresh: true });
+  if (info.exists === null) throw Object.assign(new Error(info.error), { status: 409 });
+  if (info.exists && !info.readable) throw Object.assign(new Error(info.error), { status: 409 });
+  if (info.exists && !String(info.text).trim()) {
+    throw Object.assign(
+      new Error(`${OPENHOP.configPath} exists but is empty; refusing to replace it and the node identity it may hold.`),
+      { status: 409 },
+    );
+  }
+  if (info.exists && !carriesIdentityForward(info.text, text)) {
+    throw Object.assign(
+      new Error(
+        'The new config does not keep the existing identity_key/identity_file. Refusing to write it because that would change the node identity.',
+      ),
+      { status: 409 },
+    );
+  }
+  const before = preservedConfig(info.text || '');
+  const systemIdentity = '/etc/openhop_repeater/identity.key';
+  if (!before.identityKey && !before.identityFile) {
+    const identityState = await systemIdentityState();
+    if (identityState === 'unknown') {
+      throw Object.assign(
+        new Error(
+          `Cannot verify whether an identity exists at ${systemIdentity}. Refusing to write a config that might create a new identity.`,
+        ),
+        { status: 409 },
+      );
+    }
+    if (identityState === 'present') {
+      const after = preservedConfig(text);
+      if (after.identityFile !== systemIdentity) {
+        throw Object.assign(
+          new Error(
+            `An identity already exists at ${systemIdentity} but the new config's identity_file does not point at it. Refusing to write a config that would create a new identity.`,
+          ),
+          { status: 409 },
+        );
+      }
+    }
+  }
+
+  if (!isLinux) throw Object.assign(new Error('Native MeshCore configuration requires Linux.'), { status: 400 });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   await run('sudo', ['-n', 'mkdir', '-p', OPENHOP.configDir], { timeout: 6000 });
   const existing = await run('sudo', ['-n', 'test', '-f', OPENHOP.configPath], { timeout: 5000 });
@@ -346,7 +453,12 @@ export async function writeNativeConfig(text, restart = false) {
   }
 
   let restarted = false;
-  if (restart) restarted = await restartNative();
+  const settings = getSettings();
+  // Starting openHop while Meshtastic owns the radio would create a second
+  // owner, so only restart when native MeshCore is the selected stack.
+  if (restart && settings.lora.mode === 'meshcore' && settings.lora.meshcore.transport === 'native') {
+    restarted = await restartNative();
+  }
   return { ok: true, path: OPENHOP.configPath, backup: existing.ok ? `${OPENHOP.configPath}.signaldeck-${stamp}.bak` : null, restarted };
 }
 

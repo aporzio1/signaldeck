@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import { getSettings, saveSettings, updateSettings } from './config.js';
 import { logger } from './log.js';
 import { renderMeshtasticConfig, writeMeshtasticdConfig } from './hardware.js';
@@ -7,6 +6,7 @@ import {
   inspectNativeConfig,
   nativeState,
   preservedConfig,
+  systemIdentityState,
   renderNativeConfig,
   restartNative,
   stopNative,
@@ -237,13 +237,17 @@ export class RadioManager {
     const preserved = preservedConfig(existing);
     // An openHop install configured through its own wizard may leave the
     // identity at the system default; adopt it rather than rotating the key.
-    if (!preserved.identityKey && !preserved.identityFile && isLinux) {
-      const systemIdentity = '/etc/openhop_repeater/identity.key';
-      let hasSystemIdentity = fs.existsSync(systemIdentity);
-      if (!hasSystemIdentity) {
-        hasSystemIdentity = (await run('sudo', ['-n', 'test', '-f', systemIdentity], { timeout: 5000 })).ok;
+    if (!preserved.identityKey && !preserved.identityFile) {
+      const identityState = await systemIdentityState();
+      if (identityState === 'unknown') {
+        throw Object.assign(
+          new Error(
+            'Cannot verify whether an openHop identity exists at /etc/openhop_repeater/identity.key. Refusing to regenerate the config to protect the node identity.',
+          ),
+          { status: 409 },
+        );
       }
-      if (hasSystemIdentity) preserved.identityFile = systemIdentity;
+      if (identityState === 'present') preserved.identityFile = '/etc/openhop_repeater/identity.key';
     }
     const position = this.gps?.getState?.() || null;
     const text = renderNativeConfig(
