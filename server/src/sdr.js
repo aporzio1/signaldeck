@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import net from 'node:net';
+import { IqPacer } from './iq-pacer.js';
 import { getSettings, saveSettings } from './config.js';
 import { logger } from './log.js';
 import { clamp, isLinux, sleep, which } from './util.js';
@@ -207,6 +208,8 @@ export class SdrService extends EventEmitter {
       throw err;
     }
     const socket = this.socket;
+    const pacer = new IqPacer(Number(sdr.sampleRate) || 1024000, (buf) => this.emitIq(buf), () => this.iqConsumers?.() ?? 1);
+    this.iqPacer = pacer;
     socket.setNoDelay(true);
     socket.on('data', (data) => {
       let buf = data;
@@ -224,9 +227,11 @@ export class SdrService extends EventEmitter {
         remainder = Buffer.from(buf.subarray(buf.length - 1));
         buf = buf.subarray(0, buf.length - 1);
       }
-      if (buf.length) this.emitIq(buf);
+      if (buf.length) pacer.push(buf);
     });
     socket.on('close', () => {
+      pacer.stop();
+      if (this.iqPacer === pacer) this.iqPacer = null;
       if (this.state.running) {
         this.state.running = false;
         this.state.lastError = 'rtl_tcp connection closed';
@@ -249,6 +254,11 @@ export class SdrService extends EventEmitter {
     this.send(CMD.SET_DIRECT_SAMPLING, Number(sdr.directSampling) || 0);
     await sleep(60);
     this.send(CMD.SET_BIAS_TEE, sdr.biasTee ? 1 : 0);
+    if (socket.destroyed || this.child !== child || child.exitCode !== null || child.signalCode !== null) {
+      pacer.stop();
+      if (this.iqPacer === pacer) this.iqPacer = null;
+      throw new Error('rtl_tcp exited or disconnected during startup');
+    }
   }
 
   connectWithRetry(host, port, attempts = 25) {
@@ -291,7 +301,7 @@ export class SdrService extends EventEmitter {
 
   async tune({ frequency, sampleRate, gainMode, gain, ppm, biasTee, directSampling, agc, offsetTuning, demod }) {
     const settings = getSettings();
-    if (!this.state.running) throw Object.assign(new Error('SDR is not running.'), { status: 409 });
+    if (!this.state.running) await this.start();
     if (frequency != null) {
       const freq = Math.round(Number(frequency));
       if (!Number.isFinite(freq) || freq < 24000 || freq > 1766000000) {
@@ -303,12 +313,16 @@ export class SdrService extends EventEmitter {
     }
     if (sampleRate != null && Number(sampleRate) !== this.state.sampleRate) {
       const rate = Math.round(Number(sampleRate));
+      if (!Number.isFinite(rate) || rate <= 0) {
+        throw Object.assign(new Error('Sample rate must be a positive number.'), { status: 400 });
+      }
       if (this.state.source === 'mock') {
         clearInterval(this.mockTimer);
         this.mockTimer = null;
         this.startMock({ ...settings.sdr, sampleRate: rate });
       } else {
         this.send(CMD.SET_SAMPLE_RATE, rate);
+        this.iqPacer?.setRate(rate);
       }
       this.state.sampleRate = Math.min(rate, this.state.source === 'mock' ? MOCK_RATE_CAP : rate);
       settings.sdr.sampleRate = rate;
@@ -363,6 +377,8 @@ export class SdrService extends EventEmitter {
     this.state.running = false;
     if (this.mockTimer) clearInterval(this.mockTimer);
     this.mockTimer = null;
+    this.iqPacer?.stop();
+    this.iqPacer = null;
     if (this.socket) {
       this.socket.removeAllListeners();
       this.socket.destroy();
