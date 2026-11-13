@@ -88,13 +88,16 @@ export class Hub {
     }
   }
 
-  /** Publish raw IQ as a binary frame: [0x01, ...interleaved IQ]. */
+  /** Publish raw IQ as a binary frame: interleaved 8-bit I/Q pairs, nothing else. */
   publishIq(buffer) {
     let sent = 0;
     for (const ws of this.clients) {
       if (ws.readyState !== 1 || !ws.channels.has('sdr-iq')) continue;
       if (ws.bufferedAmount > this.maxBuffered) continue;
-      ws.send(Buffer.concat([Buffer.from([1]), buffer]), { binary: true });
+      // A 0x01 marker used to be prepended here; the browser demodulator treats
+      // every binary byte as IQ, so the marker shifted the whole stream by one
+      // byte. Send the pairs verbatim (sdr.js guarantees even lengths).
+      ws.send(buffer, { binary: true });
       sent += 1;
     }
     if (sent && !this.iqLogged) {

@@ -73,6 +73,17 @@ export class SdrService extends EventEmitter {
 
   async start(options = {}) {
     if (this.state.running) return this.getState();
+    // start/stop were unserialized: two API calls in flight could each spawn
+    // rtl_tcp, fighting over the dongle. Route concurrent starts through one
+    // in-flight start promise.
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this._start(options).finally(() => {
+      this.startPromise = null;
+    });
+    return this.startPromise;
+  }
+
+  async _start(options) {
     const settings = getSettings();
     const sdr = { ...settings.sdr, ...options };
     const source = options.source || (await this.resolveSource());
@@ -161,8 +172,9 @@ export class SdrService extends EventEmitter {
     const args = ['-a', host, '-p', String(port)];
     if (sdr.deviceIndex) args.push('-d', String(sdr.deviceIndex));
     log.info(`${bin} ${args.join(' ')}`);
-    this.child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    this.child.stdout.on('data', (d) => log.info(`rtl_tcp: ${d.toString().trim()}`));
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    this.child = child;
+    child.stdout.on('data', (d) => log.info(`rtl_tcp: ${d.toString().trim()}`));
     const onErr = (d) => {
       const text = d.toString().trim();
       if (text) {
@@ -170,9 +182,9 @@ export class SdrService extends EventEmitter {
         this.state.lastError = text;
       }
     };
-    this.child.stderr.on('data', onErr);
-    this.child.on('exit', (code, signal) => {
-      this.child = null;
+    child.stderr.on('data', onErr);
+    child.on('exit', (code, signal) => {
+      if (this.child === child) this.child = null;
       if (this.state.running) {
         this.state.running = false;
         this.state.lastError = `rtl_tcp exited (${signal || code})`;
@@ -181,17 +193,47 @@ export class SdrService extends EventEmitter {
       }
     });
 
-    this.socket = await this.connectWithRetry(host, port);
-    this.socket.setNoDelay(true);
-    this.socket.on('data', (data) => this.emitIq(data));
-    this.socket.on('close', () => {
+    // The stream opens with a 12-byte rtl_tcp response header (magic + IQ byte
+    // count) and TCP chunks land on arbitrary boundaries: the old code fed all
+    // of it to the browser as IQ bytes. Consume the header, carry an odd
+    // trailing byte into the next chunk, emit only whole I/Q pairs.
+    let headerLeft = 12;
+    let remainder = null;
+    try {
+      this.socket = await this.connectWithRetry(host, port);
+    } catch (err) {
+      child.kill('SIGTERM');
+      if (this.child === child) this.child = null;
+      throw err;
+    }
+    const socket = this.socket;
+    socket.setNoDelay(true);
+    socket.on('data', (data) => {
+      let buf = data;
+      if (headerLeft > 0) {
+        const take = Math.min(headerLeft, buf.length);
+        headerLeft -= take;
+        buf = buf.subarray(take);
+        if (!buf.length) return;
+      }
+      if (remainder) {
+        buf = Buffer.concat([remainder, buf]);
+        remainder = null;
+      }
+      if (buf.length % 2) {
+        remainder = Buffer.from(buf.subarray(buf.length - 1));
+        buf = buf.subarray(0, buf.length - 1);
+      }
+      if (buf.length) this.emitIq(buf);
+    });
+    socket.on('close', () => {
       if (this.state.running) {
         this.state.running = false;
         this.state.lastError = 'rtl_tcp connection closed';
         this.emit('state', this.getState());
       }
     });
-    this.socket.on('error', (err) => {
+    socket.on('error', (err) => {
       this.state.lastError = err.message;
       log.error(`socket: ${err.message}`);
     });
@@ -316,6 +358,8 @@ export class SdrService extends EventEmitter {
   }
 
   async stop() {
+    // Serialize against an in-flight start so stop never races spawn.
+    if (this.startPromise) await this.startPromise.catch(() => {});
     this.state.running = false;
     if (this.mockTimer) clearInterval(this.mockTimer);
     this.mockTimer = null;
@@ -324,10 +368,19 @@ export class SdrService extends EventEmitter {
       this.socket.destroy();
       this.socket = null;
     }
-    if (this.child) {
-      this.child.kill('SIGTERM');
-      setTimeout(() => this.child?.kill('SIGKILL'), 1500).unref?.();
-      this.child = null;
+    const child = this.child;
+    this.child = null;
+    if (child) {
+      child.kill('SIGTERM');
+      // The SIGKILL escalation must reference the captured child; reading
+      // this.child after it was nulled meant stale children were never killed.
+      setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }, 1500).unref?.();
     }
     this.state.source = 'idle';
     this.state.bytesPerSecond = 0;

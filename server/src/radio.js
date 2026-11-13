@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { getSettings, saveSettings, updateSettings } from './config.js';
 import { logger } from './log.js';
-import { renderMeshtasticConfig, writeMeshtasticdConfig } from './hardware.js';
+import { renderMeshtasticConfig, readMeshtasticdConfig, writeMeshtasticdConfig } from './hardware.js';
 import {
   OPENHOP,
   configExists,
@@ -142,31 +142,54 @@ export class RadioManager {
   async _handover(mode, transport) {
     const settings = getSettings();
     const warnings = [];
-    let nextTransport = settings.lora.meshcore.transport || 'tcp';
+    const previous = { mode: settings.lora.mode, transport: settings.lora.meshcore.transport || 'tcp' };
+    let nextTransport = previous.transport;
     if (mode === 'meshcore' && ['native', 'tcp', 'serial'].includes(transport)) nextTransport = transport;
 
-    updateSettings({ lora: { mode, ...(mode === 'meshcore' ? { meshcore: { transport: nextTransport } } : {}) } });
-    await saveSettings();
-    this.progress(`Selected ${mode === 'meshcore' ? `MeshCore (${nextTransport})` : 'Meshtastic'}`);
+    // The selected mode was previously persisted before anything happened: a
+    // failed handover left settings claiming an owner the hardware rejected.
+    // Commit the selection only after the handover completes.
+    this.progress(`Switching to ${mode === 'meshcore' ? `MeshCore (${nextTransport})` : 'Meshtastic'}`);
 
     if (mode === 'meshtastic') {
       await this.stopBridge('meshcore');
       this.progress('Detached the MeshCore bridge');
 
       if (isLinux) {
+        // Overwriting a live, possibly hand-tuned config.yaml on every
+        // selection (even a no-op re-select) discarded settings SignalDeck
+        // never renders. Compare first: write only on drift, restart only on
+        // config drift or an idle daemon.
+        let configDrift = true;
         try {
-          await writeMeshtasticdConfig(renderMeshtasticConfig(getSettings().lora.radio), false);
-          this.progress('Wrote meshtasticd radio configuration');
-        } catch (err) {
-          warnings.push(`meshtasticd config: ${err.message}`);
+          const existing = ((await readMeshtasticdConfig()) || '').trim();
+          const rendered = renderMeshtasticConfig(getSettings().lora.radio).trim();
+          configDrift = !existing || existing !== rendered;
+        } catch {
+          configDrift = true;
+        }
+        if (configDrift) {
+          try {
+            await writeMeshtasticdConfig(renderMeshtasticConfig(getSettings().lora.radio), false);
+            this.progress('Wrote meshtasticd radio configuration');
+          } catch (err) {
+            warnings.push(`meshtasticd config: ${err.message}`);
+          }
+        } else {
+          this.progress('meshtasticd configuration already matches — file left untouched');
         }
         if ((await this.nativeActive()).active) {
           await stopNative();
           this.progress('Stopped openHop Repeater');
         }
-        const started = await run('sudo', ['-n', 'systemctl', 'restart', 'meshtasticd'], { timeout: 30000 });
-        if (!started.ok) warnings.push(started.stderr || 'Could not start meshtasticd (check the sudoers rules).');
-        else this.progress('Started meshtasticd');
+        const wasActive = (await serviceStatus('meshtasticd')).active;
+        if (configDrift || !wasActive) {
+          const started = await run('sudo', ['-n', 'systemctl', 'restart', 'meshtasticd'], { timeout: 30000 });
+          if (!started.ok) warnings.push(started.stderr || 'Could not start meshtasticd (check the sudoers rules).');
+          else this.progress('Started meshtasticd');
+        } else {
+          this.progress('meshtasticd already running with the current configuration — no restart');
+        }
 
         const ready = await waitForTcp(getSettings().lora.meshtastic.host || '127.0.0.1', Number(getSettings().lora.meshtastic.port) || 4403, 25000);
         this.progress(ready ? 'meshtasticd is accepting connections on 4403' : 'meshtasticd did not open port 4403 in time');
@@ -212,8 +235,11 @@ export class RadioManager {
       }
     }
 
+    updateSettings({ lora: { mode, ...(mode === 'meshcore' ? { meshcore: { transport: nextTransport } } : {}) } });
+    await saveSettings();
+    this.progress(`Selected ${mode === 'meshcore' ? `MeshCore (${nextTransport})` : 'Meshtastic'}`);
     this.progress('Handover complete');
-    return { ok: true, mode, transport: nextTransport, warnings, steps: this.steps };
+    return { ok: !warnings.length, mode, transport: nextTransport, warnings, steps: this.steps };
   }
 
   async nativeActive() {
@@ -421,6 +447,15 @@ export class RadioManager {
    * both daemons, so the loser is stopped before anything touches the radio.
    */
   async enforce() {
+    // Boot enforcement used to bypass an in-flight handover lock, letting two
+    // owners race for the SX1262 when the API answered before boot settled.
+    if (this.lock) {
+      try {
+        await this.lock;
+      } catch {
+        /* handover failed; enforcement below reconciles */
+      }
+    }
     const settings = getSettings();
     const mode = settings.lora.mode;
     const transport = settings.lora.meshcore.transport || 'tcp';

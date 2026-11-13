@@ -124,13 +124,28 @@ export function getSettings() {
   return loadSettings();
 }
 
-export async function saveSettings() {
-  const s = loadSettings();
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = `${settingsFile()}.tmp`;
-  await fsp.writeFile(tmp, JSON.stringify(s, null, 2), { mode: 0o600 });
-  await fsp.rename(tmp, settingsFile());
-  return s;
+let saveChain = Promise.resolve();
+
+export function saveSettings() {
+  // Concurrent callers shared one fixed tmp path, so parallel renames raced and
+  // lost writes (20 parallel saves → 1 success, 19 ENOENT). Serialize through a
+  // chain and give every write its own tmp name; errors still propagate to each
+  // caller's promise.
+  const run = async () => {
+    const s = loadSettings();
+    await fsp.mkdir(DATA_DIR, { recursive: true });
+    const tmp = `${settingsFile()}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+    try {
+      await fsp.writeFile(tmp, JSON.stringify(s, null, 2), { mode: 0o600 });
+      await fsp.rename(tmp, settingsFile());
+    } catch (err) {
+      await fsp.unlink(tmp).catch(() => {});
+      throw err;
+    }
+    return s;
+  };
+  saveChain = saveChain.then(run, run);
+  return saveChain;
 }
 
 export function publicSettings() {
