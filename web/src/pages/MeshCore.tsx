@@ -287,7 +287,14 @@ export function MeshCorePage() {
                     </Badge>
                     <Badge>companion :{data.native?.companion?.port || 5000}</Badge>
                     <Badge>{String(data.native?.preset || '').toUpperCase()}</Badge>
+                    {data.native?.config?.exists === null && <Badge tone="bad" dot>config unverified</Badge>}
+                    {data.native?.config?.exists === true && !data.native.config.readable && (
+                      <Badge tone="bad" dot>config unreadable</Badge>
+                    )}
                   </div>
+                  {data.native?.config?.error && (
+                    <div className="tiny" style={{ color: 'var(--red)', marginTop: 4 }}>{data.native.config.error}</div>
+                  )}
                   <div className="dim tiny" style={{ marginTop: 6 }}>
                     {data.native?.nodeName} · {fmtHz(data.native?.frequency)} · SF{data.native?.spreadingFactor} ·{' '}
                     {data.native?.txPower} dBm

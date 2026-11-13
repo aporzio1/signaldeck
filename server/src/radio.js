@@ -4,10 +4,9 @@ import { logger } from './log.js';
 import { renderMeshtasticConfig, writeMeshtasticdConfig } from './hardware.js';
 import {
   OPENHOP,
-  configExists,
+  inspectNativeConfig,
   nativeState,
   preservedConfig,
-  readNativeConfig,
   renderNativeConfig,
   restartNative,
   stopNative,
@@ -65,6 +64,8 @@ export class RadioManager {
 
     const conflict = Boolean(meshtasticd.active && native.active);
     const warnings = [];
+    if (native.config?.exists === null) warnings.push(native.config.error);
+    else if (native.config?.exists && !native.config.readable) warnings.push(native.config.error);
     if (conflict) {
       warnings.push('meshtasticd and openHop are both running. Both cannot own the SX1262 — switch the stack to resolve it.');
     }
@@ -222,17 +223,17 @@ export class RadioManager {
 
   /** Render the config from current settings, carrying the existing identity forward. */
   async renderNative() {
-    const existing = await readNativeConfig();
-    const persisted = await configExists();
-    if (isLinux && persisted && !String(existing).trim()) {
+    // Fail closed: only write when the file is proven absent or fully read.
+    const info = await inspectNativeConfig({ fresh: true });
+    if (info.exists === null) throw Object.assign(new Error(info.error), { status: 500 });
+    if (info.exists && !info.readable) throw Object.assign(new Error(info.error), { status: 500 });
+    if (info.exists && !String(info.text).trim()) {
       throw Object.assign(
-        new Error(
-          `Cannot read ${OPENHOP.configPath}, so the existing MeshCore identity cannot be preserved. ` +
-            'Refusing to regenerate the config. Re-run install.sh to refresh the sudoers rule for reading it, then retry.',
-        ),
+        new Error(`${OPENHOP.configPath} exists but is empty; refusing to regenerate it and replace the node identity.`),
         { status: 500 },
       );
     }
+    const existing = info.text || '';
     const preserved = preservedConfig(existing);
     // An openHop install configured through its own wizard may leave the
     // identity at the system default; adopt it rather than rotating the key.

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import net from 'node:net';
 import { getSettings } from './config.js';
 import { serviceStatus } from './system.js';
@@ -18,7 +19,7 @@ export const OPENHOP = {
   repo: 'https://github.com/openhop-dev/openhop_repeater.git',
   service: 'openhop-repeater',
   configDir: '/etc/openhop_repeater',
-  configPath: '/etc/openhop_repeater/config.yaml',
+  configPath: process.env.SIGNALDECK_OPENHOP_CONFIG || '/etc/openhop_repeater/config.yaml',
   identityFile: '/var/lib/openhop_repeater/identity.key',
   stateDir: '/var/lib/openhop_repeater',
 };
@@ -158,25 +159,109 @@ export function renderNativeConfig(settings = getSettings(), position = null, pr
   return lines.join('\n');
 }
 
-/**
- * Read the installed config even after it has been handed to openHop's service
- * user (mode 0600). Without the privileged fallback a regeneration would look
- * like a fresh install and rotate the node identity.
- */
-export async function readNativeConfig() {
-  const direct = await readText(OPENHOP.configPath, 256 * 1024);
-  if (direct != null) return direct;
-  if (!isLinux) return '';
-  const res = await run('sudo', ['-n', 'cat', OPENHOP.configPath], { timeout: 6000, maxBuffer: 1024 * 1024 });
-  return res.ok ? res.stdout : '';
+const CONFIG_CACHE_MS = 8000;
+let configCache = null;
+
+function sudoCouldNotAnswer(res) {
+  return /password is required|not allowed|not in the sudoers|a terminal is required|command not found/i.test(res.stderr || '');
 }
 
-export async function configExists() {
-  if (fs.existsSync(OPENHOP.configPath)) return true;
-  if (!isLinux) return false;
-  // The config directory may itself be unreadable to the SignalDeck user.
-  const res = await run('sudo', ['-n', 'test', '-f', OPENHOP.configPath], { timeout: 5000 });
-  return res.ok;
+async function readConfigFile(file) {
+  const direct = await readText(file, 512 * 1024);
+  if (direct != null) return { text: direct, source: 'file' };
+  if (!isLinux) return null;
+  // The file is normally owned by openHop's service user (mode 0600).
+  const cat = await run('sudo', ['-n', 'cat', file], { timeout: 6000, maxBuffer: 1024 * 1024 });
+  return cat.ok ? { text: cat.stdout, source: 'sudo' } : null;
+}
+
+/**
+ * Probe the installed config without guessing. `exists` is true, false (proven
+ * absent) or null (cannot be determined). Callers must refuse to write unless
+ * the file is proven absent or has been read successfully: writing over an
+ * identity we cannot see would rotate the node's MeshCore key.
+ */
+async function probeNativeConfig() {
+  const path = OPENHOP.configPath;
+  let stat = null;
+  let statError = null;
+  try {
+    stat = await fsp.stat(path);
+  } catch (err) {
+    statError = err;
+  }
+
+  if (!stat && statError?.code === 'ENOENT') {
+    return { path, exists: false, readable: false, text: '', source: 'none', error: null };
+  }
+
+  if (!stat) {
+    if (!isLinux) {
+      return {
+        path,
+        exists: null,
+        readable: false,
+        text: '',
+        source: 'none',
+        error: `Cannot verify ${path} (${statError?.code || 'stat failed'}). Native MeshCore applies are blocked to protect the node identity.`,
+      };
+    }
+    const test = await run('sudo', ['-n', 'test', '-f', path], { timeout: 5000 });
+    if (!test.ok) {
+      if (test.code === 1 && !sudoCouldNotAnswer(test)) {
+        return { path, exists: false, readable: false, text: '', source: 'none', error: null };
+      }
+      return {
+        path,
+        exists: null,
+        readable: false,
+        text: '',
+        source: 'none',
+        error: `Cannot verify whether ${path} exists. Native MeshCore applies are blocked to protect the node identity; re-run install.sh to refresh the sudoers rules.`,
+      };
+    }
+  }
+
+  if (stat && !stat.isFile()) {
+    return {
+      path,
+      exists: true,
+      readable: false,
+      text: '',
+      source: 'none',
+      error: `${path} is not a regular file; native MeshCore applies are blocked.`,
+    };
+  }
+
+  const read = await readConfigFile(path);
+  if (read) {
+    return { path, exists: true, readable: true, text: read.text, source: read.source, error: null };
+  }
+  return {
+    path,
+    exists: true,
+    readable: false,
+    text: '',
+    source: 'none',
+    error: `Cannot read ${path}. Native MeshCore applies are blocked so the existing identity is not replaced; re-run install.sh to refresh the sudoers rule for this file.`,
+  };
+}
+
+export async function inspectNativeConfig({ fresh = false } = {}) {
+  if (!fresh && configCache && Date.now() - configCache.at < CONFIG_CACHE_MS) return configCache.value;
+  const value = await probeNativeConfig();
+  configCache = { at: Date.now(), value };
+  return value;
+}
+
+export function invalidateNativeConfigCache() {
+  configCache = null;
+}
+
+/** Read the config, returning '' when it is absent or cannot be read. */
+export async function readNativeConfig() {
+  const info = await inspectNativeConfig();
+  return info.readable ? info.text : '';
 }
 
 export async function waitForTcp(host, port, timeoutMs = 20000) {
@@ -202,13 +287,14 @@ export async function waitForTcp(host, port, timeoutMs = 20000) {
 
 export async function nativeState(settings = getSettings(), options = {}) {
   const native = nativeSettings(settings);
-  const service = await serviceStatus(OPENHOP.service);
-  const installed = fs.existsSync(OPENHOP.dir) && fs.existsSync(OPENHOP.configPath);
+  const [service, config] = await Promise.all([serviceStatus(OPENHOP.service), inspectNativeConfig()]);
+  const installed = fs.existsSync(OPENHOP.dir) && config.exists === true;
   const companionReachable = isLinux && options.probe ? await waitForTcp(native.bindAddress, native.tcpPort, 900) : false;
   return {
     backend: 'openhop',
     installed,
     configPath: OPENHOP.configPath,
+    config: { path: config.path, exists: config.exists, readable: config.readable, source: config.source, error: config.error },
     serviceDir: OPENHOP.dir,
     service,
     active: service.active,
@@ -250,6 +336,7 @@ export async function writeNativeConfig(text, restart = false) {
     // can read the generated password and identity path.
     const owner = await serviceUser();
     await run('sudo', ['-n', 'chown', owner, OPENHOP.configPath], { timeout: 6000 });
+    invalidateNativeConfigCache();
   }
   if (!copied.ok) {
     throw Object.assign(
