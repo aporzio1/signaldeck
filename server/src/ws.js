@@ -92,6 +92,13 @@ export class Hub {
   }
 
   /** Publish raw IQ as a binary frame: interleaved 8-bit I/Q pairs, nothing else. */
+  /** Number of sockets currently subscribed to the raw IQ stream. */
+  iqSubscribers() {
+    let n = 0;
+    for (const ws of this.clients) if (ws.channels?.has('sdr-iq')) n += 1;
+    return n;
+  }
+
   publishIq(buffer) {
     let sent = 0;
     for (const ws of this.clients) {

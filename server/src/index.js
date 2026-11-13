@@ -86,6 +86,7 @@ hub.attach(server);
 
 function wireSdr() {
   sdr.on('iq', (buffer) => hub.publishIq(buffer));
+  sdr.iqConsumers = () => hub.iqSubscribers();
   sdr.on('state', (state) => hub.publish('sdr', state));
 }
 
