@@ -8,7 +8,10 @@ export class Hub {
   constructor() {
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
     this.clients = new Set();
-    this.maxBuffered = 4 * 1024 * 1024;
+    // 4 MB is ~2 s of IQ; once the socket backs up that deep, every dropped
+    // frame is a half-second audible hole before sends resume. 256 KB keeps the
+    // backpressure window (~128 ms of audio) below the listener's perception.
+    this.maxBuffered = 256 * 1024;
   }
 
   attach(server) {
