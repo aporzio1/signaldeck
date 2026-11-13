@@ -116,7 +116,10 @@ export class SdrEngine {
     source.connect(this.gain);
 
     const now = this.ctx.currentTime;
-    if (this.nextTime < now + 0.02 || this.nextTime > now + 0.7) this.nextTime = now + 0.08;
+    // rtl_tcp delivers IQ in ~130ms USB buffer waves even on wired LAN; an
+    // 80ms reservoir starves between waves and the scheduler re-seeds, which
+    // is an audible metronome. 400ms of buffer rides the waves out.
+    if (this.nextTime < now + 0.02 || this.nextTime > now + 1.2) this.nextTime = now + 0.4;
     source.start(this.nextTime);
     this.nextTime += buffer.duration;
   }
