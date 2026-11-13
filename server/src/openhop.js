@@ -64,9 +64,33 @@ function quote(value) {
  * Render a complete openHop config. GPIO defaults match openHop's own
  * HackerGadgets uConsole preset (SPI1 CE0, IRQ 26, BUSY 24, RESET 25).
  */
-export function renderNativeConfig(settings = getSettings(), position = null) {
+/**
+ * Pull the identity and admin password out of an existing config so a
+ * regeneration never rotates the node's MeshCore identity or locks out the
+ * remote CLI.
+ */
+export function preservedConfig(text) {
+  if (!text) return {};
+  const scalar = (key) => {
+    const match = new RegExp(`^[\\t ]*${key}:[\\t ]*(\\S.*)$`, 'm').exec(text);
+    const raw = match?.[1]?.trim();
+    if (!raw || raw === 'null' || raw === '""' || raw === "''") return '';
+    return raw;
+  };
+  const identityKey = scalar('identity_key');
+  const identityFile = scalar('identity_file').replace(/^["']|["']$/g, '');
+  return {
+    identityKey,
+    identityFile: identityFile.startsWith('/') ? identityFile : '',
+    adminPassword: scalar('admin_password').replace(/^["']|["']$/g, ''),
+  };
+}
+
+export function renderNativeConfig(settings = getSettings(), position = null, preserve = {}) {
   const native = nativeSettings(settings);
   const radio = native.radio || {};
+  const identityFile = preserve.identityFile || OPENHOP.identityFile;
+  const adminPassword = preserve.adminPassword || native.adminPassword;
   const spidev = /spidev(\d+)\.(\d+)/.exec(String(radio.spidev || ''));
   const busId = Number(spidev?.[1] ?? 0);
   const csId = Number(spidev?.[2] ?? 0);
@@ -76,11 +100,12 @@ export function renderNativeConfig(settings = getSettings(), position = null) {
     '# Edit through SignalDeck (System → Native MeshCore) so pin and preset changes stay tracked.',
     'repeater:',
     `  node_name: ${quote(native.nodeName)}`,
-    `  identity_file: ${quote(OPENHOP.identityFile)}`,
+    ...(preserve.identityKey ? [`  identity_key: ${preserve.identityKey}`] : []),
+    `  identity_file: ${quote(identityFile)}`,
     position && Number.isFinite(position.lat) ? `  latitude: ${position.lat}` : '  latitude: null',
     position && Number.isFinite(position.lon) ? `  longitude: ${position.lon}` : '  longitude: null',
     '  guest_password: ""',
-    native.adminPassword ? `  admin_password: ${quote(native.adminPassword)}` : '  admin_password: ""',
+    adminPassword ? `  admin_password: ${quote(adminPassword)}` : '  admin_password: ""',
     '  allow_read_only: true',
     '',
     'radio_type: sx1262',

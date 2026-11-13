@@ -58,7 +58,19 @@ export function SettingsPage() {
       const payload = await api.put('/settings', patch);
       setSettings(payload);
       setRadio(payload.lora.radio);
-      toast(message, 'good');
+      if (payload.nativeApply) {
+        const warnings = payload.nativeApply.warnings || [];
+        setHandoverSteps(payload.nativeApply.steps || []);
+        toast(
+          warnings.length
+            ? `${message} — openHop applied with ${warnings.length} warning(s)`
+            : `${message} — openHop config regenerated`,
+          warnings.length ? 'bad' : 'good',
+        );
+        await loadRadio();
+      } else {
+        toast(message, 'good');
+      }
       refresh();
     } catch (error: any) {
       toast(error.message, 'bad');
@@ -222,6 +234,11 @@ export function SettingsPage() {
             <span className="dim tiny">
               SPI1 CE0 · IRQ 26 · BUSY 24 · RESET 25 · GPS /dev/ttyS0 @ 9600 · RTC PCF85063A on I2C
             </span>
+          </div>
+          <div className="hint-box small">
+            Saving while native MeshCore owns the radio regenerates{' '}
+            <span className="code">/etc/openhop_repeater/config.yaml</span>, keeps the existing node identity, restarts
+            openHop and reattaches the bridge automatically.
           </div>
         </div>
       </Card>

@@ -1,7 +1,19 @@
+import fs from 'node:fs';
 import { getSettings, saveSettings, updateSettings } from './config.js';
 import { logger } from './log.js';
 import { renderMeshtasticConfig, writeMeshtasticdConfig } from './hardware.js';
-import { configExists, nativeState, renderNativeConfig, restartNative, stopNative, waitForTcp, writeNativeConfig, nativeSettings } from './openhop.js';
+import {
+  OPENHOP,
+  nativeState,
+  preservedConfig,
+  readNativeConfig,
+  renderNativeConfig,
+  restartNative,
+  stopNative,
+  waitForTcp,
+  writeNativeConfig,
+  nativeSettings,
+} from './openhop.js';
 import { serviceStatus } from './system.js';
 import { isLinux, run } from './util.js';
 
@@ -115,8 +127,8 @@ export class RadioManager {
       throw Object.assign(new Error('Mode must be meshtastic or meshcore.'), { status: 400 });
     }
     if (this.lock) throw Object.assign(new Error('A radio handover is already in progress.'), { status: 409 });
-    this.lock = this._handover(mode, transport);
     this.steps = [];
+    this.lock = this._handover(mode, transport);
     this.hub?.publish('radio', { switching: true, steps: this.steps, mode: getSettings().lora.mode });
     try {
       return await this.lock;
@@ -177,20 +189,7 @@ export class RadioManager {
         this.progress(stopped.ok ? 'Stopped meshtasticd (radio released)' : 'meshtasticd stop was refused');
 
         if (nextTransport === 'native') {
-          try {
-            if (!configExists()) {
-              await this.prepareNativeConfig();
-              this.progress('Wrote the openHop configuration');
-            }
-            await restartNative();
-            this.progress('Started openHop Repeater');
-          } catch (err) {
-            warnings.push(`openHop: ${err.message}`);
-          }
-          const native = nativeSettings(getSettings());
-          const ready = await waitForTcp(native.bindAddress, native.tcpPort, 30000);
-          this.progress(ready ? `Companion endpoint ready on ${native.tcpPort}` : 'Companion endpoint did not open in time');
-          if (!ready) warnings.push(`openHop did not open companion TCP ${native.tcpPort} within 30 s. Check its journal.`);
+          await this._applyNative(warnings, { reconnectBridge: false });
         } else {
           await stopNative();
           this.progress('Stopped openHop Repeater (external companion selected)');
@@ -213,16 +212,148 @@ export class RadioManager {
     return nativeState(getSettings());
   }
 
-  /** Render and install the openHop config without starting it. */
-  async prepareNativeConfig() {
-    const settings = getSettings();
-    if (!nativeSettings(settings).adminPassword) {
-      const { randomBytes } = await import('node:crypto');
-      updateSettings({ lora: { meshcore: { native: { adminPassword: randomBytes(12).toString('base64url') } } } });
-      await saveSettings();
+  /** Render the config from current settings, carrying the existing identity forward. */
+  async renderNative() {
+    const existing = await readNativeConfig();
+    const preserved = preservedConfig(existing);
+    // An openHop install configured through its own wizard may leave the
+    // identity at the system default; adopt it rather than rotating the key.
+    if (!preserved.identityKey && !preserved.identityFile && isLinux && fs.existsSync('/etc/openhop_repeater/identity.key')) {
+      preserved.identityFile = '/etc/openhop_repeater/identity.key';
     }
     const position = this.gps?.getState?.() || null;
-    return writeNativeConfig(renderNativeConfig(getSettings(), position?.lat != null ? { lat: position.lat, lon: position.lon } : null), false);
+    const text = renderNativeConfig(
+      getSettings(),
+      position?.lat != null ? { lat: position.lat, lon: position.lon } : null,
+      preserved,
+    );
+    return { text, preserved, existing };
+  }
+
+  async ensureNativePassword() {
+    if (nativeSettings(getSettings()).adminPassword) return;
+    const { randomBytes } = await import('node:crypto');
+    updateSettings({ lora: { meshcore: { native: { adminPassword: randomBytes(12).toString('base64url') } } } });
+    await saveSettings();
+  }
+
+  /** Write the regenerated config without restarting anything (used before a handover). */
+  async prepareNativeConfig() {
+    await this.ensureNativePassword();
+    const { text } = await this.renderNative();
+    return writeNativeConfig(text, false);
+  }
+
+  /** Persist native config changes while MeshCore does not own the radio. */
+  async saveNativeConfig() {
+    await this.ensureNativePassword();
+    const { text, preserved } = await this.renderNative();
+    const base = {
+      applied: false,
+      pending: true,
+      configPath: OPENHOP.configPath,
+      identityFile: preserved.identityFile || OPENHOP.identityFile,
+      preservedIdentity: Boolean(preserved.identityKey || preserved.identityFile),
+      rendered: text,
+    };
+    if (!isLinux) {
+      return { ...base, ok: false, warnings: ['Native MeshCore configuration is written on Linux only.'] };
+    }
+    const write = await writeNativeConfig(text, false);
+    return { ...base, ok: true, backup: write.backup, warnings: [] };
+  }
+
+  /**
+   * Regenerate /etc/openhop_repeater/config.yaml from the current pins, preset
+   * and node name, restart openHop and reattach the bridge. The identity is
+   * read from the existing config first, so applying a preset never rotates the
+   * node's MeshCore identity.
+   */
+  async applyNative() {
+    const settings = getSettings();
+    if (settings.lora.mode !== 'meshcore' || settings.lora.meshcore.transport !== 'native') {
+      throw Object.assign(
+        new Error('MeshCore does not own the HAT radio. Switch to Meshtastic or native MeshCore before applying the config.'),
+        { status: 409 },
+      );
+    }
+    if (this.lock) throw Object.assign(new Error('A radio operation is already in progress.'), { status: 409 });
+    this.steps = [];
+    this.lock = this._applyNative([], { reconnectBridge: true });
+    this.hub?.publish('radio', { switching: true, steps: this.steps, mode: settings.lora.mode });
+    try {
+      return await this.lock;
+    } finally {
+      this.lock = null;
+      this.hub?.publish('radio', { switching: false, steps: this.steps, mode: getSettings().lora.mode });
+    }
+  }
+
+  async _applyNative(warnings, { reconnectBridge = false } = {}) {
+    await this.ensureNativePassword();
+    this.progress('Regenerating openHop configuration');
+    const { text, preserved, existing } = await this.renderNative();
+    const changed = text.trim() !== String(existing || '').trim();
+
+    let backup = null;
+    let restarted = false;
+    let ready = false;
+    let wrote = false;
+    if (!isLinux) {
+      warnings.push('Native MeshCore configuration and service control require Linux.');
+      this.progress('Config apply skipped (not Linux)');
+    } else if (!changed) {
+      wrote = true;
+      this.progress('openHop configuration already matches the saved settings');
+    } else {
+      try {
+        const write = await writeNativeConfig(text, false);
+        backup = write.backup;
+        wrote = true;
+        this.progress(`Wrote ${OPENHOP.configPath}${backup ? ' (previous file backed up)' : ''}`);
+      } catch (err) {
+        warnings.push(`openHop config: ${err.message}`);
+        this.progress('Could not write the openHop configuration');
+      }
+
+      if (wrote) {
+        restarted = await restartNative();
+        this.progress(restarted ? 'Restarted openHop Repeater' : 'openHop Repeater did not restart');
+        if (!restarted) warnings.push('openHop Repeater did not restart. Check its journal from the System page.');
+
+        const native = nativeSettings(getSettings());
+        ready = restarted && (await waitForTcp(native.bindAddress, native.tcpPort, 30000));
+        this.progress(ready ? `Companion endpoint ready on ${native.tcpPort}` : 'Companion endpoint did not open in time');
+        if (restarted && !ready) {
+          warnings.push(`openHop did not open companion TCP ${native.tcpPort} within 30 s. Check its journal.`);
+        }
+
+        if (reconnectBridge) {
+          this.progress('Reattaching the MeshCore bridge');
+          await this.stopBridge('meshcore');
+          try {
+            await this.mesh.meshcore.start();
+          } catch (err) {
+            warnings.push(`MeshCore bridge: ${err.message}`);
+          }
+        }
+      }
+    }
+
+    return {
+      ok: isLinux ? restarted && ready : false,
+      applied: restarted,
+      pending: false,
+      restarted,
+      ready,
+      backup,
+      configPath: OPENHOP.configPath,
+      identityFile: preserved.identityFile || OPENHOP.identityFile,
+      preservedIdentity: Boolean(preserved.identityKey || preserved.identityFile),
+      rendered: text,
+      steps: this.steps.slice(),
+      warnings,
+    };
   }
 
   async stopBridge(kind) {
@@ -269,11 +400,9 @@ export class RadioManager {
         await run('sudo', ['-n', 'systemctl', 'stop', 'meshtasticd'], { timeout: 25000 });
         this.progress('Boot: released meshtasticd');
         if (transport === 'native') {
-          if (!configExists()) await this.prepareNativeConfig();
-          await restartNative();
-          const native = nativeSettings(getSettings());
-          const ready = await waitForTcp(native.bindAddress, native.tcpPort, 25000);
-          if (!ready) log.warn('openHop companion endpoint did not open during boot enforcement');
+          const warnings = [];
+          await this._applyNative(warnings, { reconnectBridge: false });
+          for (const warning of warnings) log.warn(warning);
         } else {
           await stopNative();
         }

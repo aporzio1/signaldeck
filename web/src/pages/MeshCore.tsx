@@ -11,6 +11,7 @@ export function MeshCorePage() {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState('');
   const [form, setForm] = useState<any>({});
+  const [nativeResult, setNativeResult] = useState<any>(null);
   const chatRef = useRef<HTMLDivElement>(null);
 
   const refresh = () =>
@@ -99,9 +100,13 @@ export function MeshCorePage() {
   const takeover = async () => {
     setBusy('takeover');
     try {
-      await api.post('/mesh/mode', { mode: 'meshcore', transport: 'native' });
+      const result = await api.post('/mesh/mode', { mode: 'meshcore', transport: 'native' });
+      setNativeResult({ applied: true, steps: result.steps || [], warnings: result.warnings || [] });
       await refresh();
-      toast('Radio handed to MeshCore', 'good');
+      toast(
+        result.warnings?.length ? 'Radio handed to MeshCore with warnings' : 'Radio handed to MeshCore',
+        result.warnings?.length ? 'bad' : 'good',
+      );
     } catch (error: any) {
       toast(error.message, 'bad');
     } finally {
@@ -289,15 +294,23 @@ export function MeshCorePage() {
                   </div>
                   <div style={{ marginTop: 8 }}>
                     <Field label="MeshCore preset" hint="Sets frequency, bandwidth, spreading factor and coding rate.">
-                      <Select
+                                                <Select
                         value={data.native?.preset || 'us'}
                         disabled={busy === 'native-preset'}
                         onChange={async (value) => {
                           setBusy('native-preset');
                           try {
-                            await api.put('/mesh/native/settings', { preset: value });
+                            const result = await api.put('/mesh/native/settings', { preset: value });
+                            setNativeResult(result);
                             await refresh();
-                            toast('MeshCore radio preset applied', 'good');
+                            toast(
+                              result.warnings?.length
+                                ? `Preset saved with a warning: ${result.warnings[0]}`
+                                : result.applied
+                                  ? 'Preset applied, openHop restarted'
+                                  : 'Preset saved — applies when MeshCore takes the radio',
+                              result.warnings?.length ? 'bad' : 'good',
+                            );
                           } catch (error: any) {
                             toast(error.message, 'bad');
                           } finally {
@@ -312,7 +325,52 @@ export function MeshCorePage() {
                     <Button size="sm" busy={busy === 'takeover'} onClick={takeover}>
                       Apply & take over radio
                     </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      busy={busy === 'native-apply'}
+                      onClick={async () => {
+                        setBusy('native-apply');
+                        try {
+                          const result = await api.post('/mesh/native/apply');
+                          setNativeResult(result);
+                          await refresh();
+                          toast(
+                            result.ok ? 'openHop config regenerated and restarted' : 'Config written — check the warnings',
+                            result.ok ? 'good' : 'bad',
+                          );
+                        } catch (error: any) {
+                          toast(error.message, 'bad');
+                        } finally {
+                          setBusy('');
+                        }
+                      }}
+                    >
+                      Re-apply config
+                    </Button>
                   </div>
+                  <div className="dim tiny mono" style={{ marginTop: 6 }}>{data.native?.configPath}</div>
+                  {nativeResult && (
+                    <div className="hint-box small" style={{ marginTop: 8 }}>
+                      <div className="row tight">
+                        <Badge tone={nativeResult.applied ? 'good' : nativeResult.pending ? 'warn' : 'bad'} dot>
+                          {nativeResult.applied
+                            ? 'Applied & restarted'
+                            : nativeResult.pending
+                              ? 'Saved for next handover'
+                              : 'Not applied'}
+                        </Badge>
+                        {nativeResult.preservedIdentity && <Badge tone="info">identity preserved</Badge>}
+                        {nativeResult.backup && <Badge>backup kept</Badge>}
+                      </div>
+                      {(nativeResult.steps || []).slice(-5).map((step: any, index: number) => (
+                        <div key={index} className="dim tiny">• {step.label}</div>
+                      ))}
+                      {(nativeResult.warnings || []).map((warning: string, index: number) => (
+                        <div key={`warn-${index}`} className="tiny" style={{ color: 'var(--red)' }}>{warning}</div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
               <div className="form-row">

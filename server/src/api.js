@@ -258,6 +258,10 @@ export function createApi({ sdr, gps, mesh, hub, radio }) {
     res.json(await radio.switchTo('meshcore', 'native'));
   }));
 
+  router.post('/mesh/native/apply', requireSameOrigin, wrap(async (req, res) => {
+    res.json({ ...(await radio.applyNative()), state: await nativeState(getSettings()) });
+  }));
+
   router.post('/mesh/native/config', requireSameOrigin, wrap(async (req, res) => {
     res.json(await writeNativeConfig(req.body?.text, Boolean(req.body?.restart)));
   }));
@@ -289,11 +293,19 @@ export function createApi({ sdr, gps, mesh, hub, radio }) {
     await saveSettings();
 
     const settings = getSettings();
-    let handover = null;
-    if (settings.lora.mode === 'meshcore' && settings.lora.meshcore.transport === 'native') {
-      handover = await radio.switchTo('meshcore', 'native');
-    }
-    res.json({ ok: true, state: await nativeState(getSettings()), handover });
+    const nativeActive = settings.lora.mode === 'meshcore' && settings.lora.meshcore.transport === 'native';
+    const apply = nativeActive ? await radio.applyNative() : await radio.saveNativeConfig();
+    res.json({
+      ok: true,
+      state: await nativeState(getSettings()),
+      applied: Boolean(apply.applied),
+      pending: Boolean(apply.pending),
+      backup: apply.backup || null,
+      identityFile: apply.identityFile,
+      preservedIdentity: Boolean(apply.preservedIdentity),
+      steps: apply.steps || [],
+      warnings: apply.warnings || [],
+    });
   }));
 
   router.post('/mesh/:kind/start', requireSameOrigin, wrap(async (req, res) => {
@@ -422,9 +434,26 @@ export function createApi({ sdr, gps, mesh, hub, radio }) {
       patch.lora = { ...(patch.lora || {}), mode: body.lora.mode };
     }
     if (body.time?.rtcDevice) patch.time = { rtcDevice: String(body.time.rtcDevice).slice(0, 40) };
+    const radioBefore = JSON.stringify(getSettings().lora.radio);
     updateSettings(patch);
     await saveSettings();
-    res.json(publicSettings());
+
+    // Pin/radio changes must reach the generated openHop file, not just
+    // settings.json, or the running MeshCore stack keeps the old wiring.
+    let nativeApply = null;
+    const current = getSettings();
+    if (
+      JSON.stringify(current.lora.radio) !== radioBefore &&
+      current.lora.mode === 'meshcore' &&
+      current.lora.meshcore.transport === 'native'
+    ) {
+      try {
+        nativeApply = await radio.applyNative();
+      } catch (err) {
+        nativeApply = { ok: false, warnings: [err.message] };
+      }
+    }
+    res.json({ ...publicSettings(), nativeApply });
   }));
 
   router.get('/version', (req, res) => res.json({ version: VERSION }));

@@ -113,6 +113,7 @@ POST   /mesh/mode                    { mode, transport } — stops the old owner
 GET    /mesh/native                  openHop state, presets, rendered + installed config
 POST   /mesh/native/provision        write config, start openHop, attach the bridge
 POST   /mesh/native/config | /restart
+POST   /mesh/native/apply            regenerate config, restart openHop, reattach the bridge
 PUT    /mesh/native/settings         MeshCore preset, power, node name, companion port
 GET    /time                         system clock, NTP, RTC devices
 POST   /time/sync                    { direction: to-rtc|from-rtc, device }
@@ -168,6 +169,8 @@ SignalDeck's Python bridge connects to `127.0.0.1:4403` and forwards messages, n
 **MeshCore (standalone).** MeshCore can run on the HAT's own SX1262. `install.sh` installs [openHop Repeater](https://github.com/openhop-dev/openhop_repeater), which owns the radio and exposes a companion endpoint on `127.0.0.1:5000`. SignalDeck generates `/etc/openhop_repeater/config.yaml` from **Settings → Radio wiring** and the MeshCore preset (frequency, bandwidth, spreading factor, coding rate, TCXO and DIO2 switch), including a persistent identity at `/var/lib/openhop_repeater/identity.key`.
 
 Choose **MeshCore — HAT radio** under **Settings → Mesh stack**. SignalDeck stops `meshtasticd`, starts openHop, waits for the companion port, and only then attaches the bridge; switching back stops openHop and restarts `meshtasticd`. The saved choice is re-applied at boot, so exactly one process ever holds the radio. `GET /api/v1/radio` reports the current owner and any conflicts.
+
+Changing the MeshCore preset, node name or the SX1262 pin map regenerates `/etc/openhop_repeater/config.yaml`, restarts openHop (with a timestamped backup of the previous file) and reattaches the bridge. The existing `identity_key`/`identity_file` and admin password are carried into the new file, so the node keeps its MeshCore identity across changes; identical configs are not rewritten. The MeshCore page shows every apply step and any warnings.
 
 An external MeshCore companion over TCP or USB serial is still supported (**MeshCore — external companion**); in that mode SignalDeck leaves the HAT radio free and talks to the companion you point it at.
 
