@@ -8,6 +8,7 @@ import { apiIndex, createApi, errorHandler } from './api.js';
 import { GpsService } from './gps.js';
 import { logger } from './log.js';
 import { MeshCoreBridge, MeshtasticBridge } from './mesh.js';
+import { RadioManager } from './radio.js';
 import { SdrService } from './sdr.js';
 import { addMessage, getState, scheduleSave } from './store.js';
 import { allServices, systemStats } from './system.js';
@@ -21,6 +22,7 @@ const hub = new Hub();
 const sdr = new SdrService();
 const gps = new GpsService();
 const mesh = { meshtastic: new MeshtasticBridge(), meshcore: new MeshCoreBridge() };
+const radio = new RadioManager({ mesh, hub, gps });
 
 const app = express();
 app.disable('x-powered-by');
@@ -33,7 +35,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use('/api/v1', createApi({ sdr, gps, mesh, hub }));
+app.use('/api/v1', createApi({ sdr, gps, mesh, hub, radio }));
 app.get('/api', apiIndex);
 app.get('/api/v1', apiIndex);
 
@@ -148,6 +150,12 @@ async function broadcastStatus() {
         meshtastic: mesh.meshtastic.getState(),
         meshcore: mesh.meshcore.getState(),
       },
+      radio: {
+        mode: getSettings().lora.mode,
+        transport: getSettings().lora.meshcore.transport,
+        switching: Boolean(radio.lock),
+        steps: radio.steps.slice(-6),
+      },
     });
   } catch (err) {
     log.warn(`status broadcast failed: ${err.message}`);
@@ -164,9 +172,8 @@ server.listen(port, host, async () => {
   await refreshServices();
   gps.start().catch((err) => log.error(`GPS start failed: ${err.message}`));
   if (settings.sdr.enabled) sdr.start().catch((err) => log.error(`SDR start failed: ${err.message}`));
-  if (settings.lora.mode === 'meshtastic' && settings.lora.meshtastic.autoStart) {
-    mesh.meshtastic.start().catch((err) => log.warn(`Meshtastic bridge: ${err.message}`));
-  }
+  // Exactly one stack may hold the SX1262; startup applies the saved choice.
+  radio.enforce().catch((err) => log.error(`Radio enforcement failed: ${err.message}`));
 });
 
 const statusTimer = setInterval(broadcastStatus, 3000);

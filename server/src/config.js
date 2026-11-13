@@ -48,7 +48,26 @@ export const DEFAULT_SETTINGS = {
   lora: {
     mode: 'meshtastic',
     meshtastic: { host: '127.0.0.1', port: 4403, autoStart: true },
-    meshcore: { transport: 'tcp', host: '127.0.0.1', port: 5000, serialPath: '/dev/ttyACM0', baud: 115200 },
+    meshcore: {
+      transport: 'tcp',
+      host: '127.0.0.1',
+      port: 5000,
+      serialPath: '/dev/ttyACM0',
+      baud: 115200,
+      native: {
+        preset: 'us',
+        frequency: 910525000,
+        bandwidth: 62500,
+        spreadingFactor: 7,
+        codingRate: 5,
+        txPower: 20,
+        pathHashMode: 0,
+        nodeName: '',
+        adminPassword: '',
+        bindAddress: '127.0.0.1',
+        tcpPort: 5000,
+      },
+    },
     radio: {
       module: 'sx1262',
       spidev: 'spidev0.0',
@@ -126,7 +145,7 @@ export function publicSettings() {
     lora: {
       mode: s.lora.mode,
       meshtastic: { ...s.lora.meshtastic },
-      meshcore: { ...s.lora.meshcore },
+      meshcore: { ...s.lora.meshcore, native: { ...s.lora.meshcore.native } },
       radio: { ...s.lora.radio },
     },
   };

@@ -14,6 +14,8 @@ export function SettingsPage() {
   const [newToken, setNewToken] = useState('');
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
+  const [radioState, setRadioState] = useState<any>(null);
+  const [handoverSteps, setHandoverSteps] = useState<any[]>([]);
 
   const load = () =>
     api.get('/settings').then((payload) => {
@@ -21,10 +23,34 @@ export function SettingsPage() {
       setRadio(payload.lora.radio);
     }).catch((error) => toast(error.message, 'bad'));
 
+  const loadRadio = () => api.get('/radio').then(setRadioState).catch(() => {});
+
   useEffect(() => {
     load();
+    loadRadio();
     authApi.tokens().then((payload) => setTokens(payload.tokens)).catch(() => {});
   }, []);
+
+  const switchStack = async (value: string) => {
+    const [mode, transport] = value.split(':');
+    setBusy('mode');
+    setHandoverSteps([]);
+    try {
+      const result = await api.post('/mesh/mode', { mode, transport });
+      setHandoverSteps(result.steps || []);
+      toast(
+        result.warnings?.length ? `Switched to ${mode} with ${result.warnings.length} warning(s)` : `Radio handed to ${mode}`,
+        result.warnings?.length ? 'bad' : 'good',
+      );
+      await load();
+      await loadRadio();
+      refresh();
+    } catch (error: any) {
+      toast(error.message, 'bad');
+    } finally {
+      setBusy('');
+    }
+  };
 
   const saveSettings = async (patch: any, message = 'Saved') => {
     setBusy('settings');
@@ -42,6 +68,13 @@ export function SettingsPage() {
   };
 
   if (!settings) return null;
+
+  const stackValue =
+    settings.lora.mode === 'meshcore'
+      ? settings.lora.meshcore.transport === 'native'
+        ? 'meshcore:native'
+        : 'meshcore:companion'
+      : 'meshtastic';
 
   return (
     <div className="stack" style={{ gap: 14 }}>
@@ -80,23 +113,43 @@ export function SettingsPage() {
 
         <Card title="Mesh stack" subtitle="The SX1262 can only be driven by one stack at a time">
           <div className="stack">
-            <Field label="Active stack" hint="MeshCore can also run against a separate companion radio.">
+            <Field label="Active stack" hint="Switching stops the process that owns the radio before starting the other.">
               <Select
-                value={settings.lora.mode}
-                onChange={(value) => saveSettings({ lora: { mode: value } }, 'Mesh stack switched')}
+                value={stackValue}
+                disabled={busy === 'mode'}
+                onChange={switchStack}
                 options={[
                   { value: 'meshtastic', label: 'Meshtastic (meshtasticd)' },
-                  { value: 'meshcore', label: 'MeshCore (companion)' },
+                  { value: 'meshcore:native', label: 'MeshCore — HAT radio (openHop)' },
+                  { value: 'meshcore:companion', label: 'MeshCore — external companion' },
                 ]}
               />
             </Field>
             <div className="row tight">
-              <Badge tone={overview?.mesh?.meshtastic?.running ? 'good' : 'warn'} dot>Meshtastic {overview?.mesh?.meshtastic?.status}</Badge>
-              <Badge tone={overview?.mesh?.meshcore?.running ? 'good' : 'warn'} dot>MeshCore {overview?.mesh?.meshcore?.status}</Badge>
+              <Badge tone={radioState?.owner === 'none' ? 'warn' : radioState?.conflict ? 'bad' : 'good'} dot>
+                {radioState?.ownerLabel || `Radio: ${settings.lora.mode}`}
+              </Badge>
+              {busy === 'mode' && <Badge tone="info" dot>Handing over…</Badge>}
             </div>
+            <div className="row tight">
+              <Badge tone={radioState?.meshtasticd?.active ? 'good' : ''} dot>meshtasticd {radioState?.meshtasticd?.active ? 'running' : 'stopped'}</Badge>
+              <Badge tone={radioState?.native?.active ? 'good' : ''} dot>openHop {radioState?.native?.active ? 'running' : 'stopped'}</Badge>
+              <Badge tone={overview?.mesh?.meshcore?.running ? 'good' : 'warn'} dot>MeshCore bridge {overview?.mesh?.meshcore?.status}</Badge>
+            </div>
+            {handoverSteps.length > 0 && (
+              <div className="hint-box small">
+                {handoverSteps.slice(-6).map((step: any, index: number) => (
+                  <div key={index} className="dim tiny">• {step.label}</div>
+                ))}
+              </div>
+            )}
+            {radioState?.conflict && (
+              <div className="alert bad small">Both meshtasticd and openHop are running. Pick a stack to release the radio.</div>
+            )}
             <div className="hint-box small">
-              Meshtastic uses meshtasticd on TCP 4403. MeshCore attaches to a companion over TCP or USB serial. Only one
-              process may own the SPI radio; stop the other stack first.
+              Meshtastic uses meshtasticd on TCP 4403. Native MeshCore runs openHop Repeater on the HAT's own SX1262 and
+              exposes a local companion endpoint, so no second radio is needed. Only one process may own the SPI radio;
+              the switch above performs the handover for you.
             </div>
           </div>
         </Card>

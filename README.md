@@ -7,7 +7,7 @@ A self-hosted web console for the **HackerGadgets RTL-SDR / LoRa / GPS / RTC HAT
 │  rtl_tcp ──► IQ over WebSocket ─┐                                     │
 │  gpsd  ────► TPV / SKY JSON ────┤                                     │
 │  meshtasticd ◄─► Python bridge ─┤──► SignalDeck (Node) ──► browser   │
-│  MeshCore companion ◄─ bridge ──┤      REST + WebSocket               │
+│  openHop Repeater ◄── bridge ───┤      REST + WebSocket               │
 │  RTC / services / config.txt ───┘                                     │
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -19,11 +19,11 @@ A self-hosted web console for the **HackerGadgets RTL-SDR / LoRa / GPS / RTC HAT
 | **Dashboard** | Live health of every subsystem, alerts, service state, quick actions |
 | **SDR** | Spectrum + waterfall, click/drag tuning, AM / NFM / WFM / USB / LSB demodulation, squelch, gain, PPM correction, bias tee, HF direct sampling, channel scanner, presets, WAV recording |
 | **Meshtastic** | Connect to meshtasticd, channels and messages, node list with distance, region/preset/power/role configuration, position request, traceroute, reboot |
-| **MeshCore** | Companion over TCP or serial, contacts, channels, direct and channel messaging, adverts, battery, endpoint configuration |
+| **MeshCore** | Standalone on the HAT's SX1262 via openHop Repeater, or an external companion over TCP/serial; contacts, channels, direct and channel messaging, adverts, battery, preset setup |
 | **GPS** | Fix, position, map, track log with GPX export, sky plot, per-satellite SNR, gpsd or direct NMEA, receiver settings |
 | **Time & RTC** | System clock, NTP/chrony status, PCF85063A drift, GNSS time offset, sync RTC ↔ system |
-| **System** | systemd service control, journal logs, boot overlay checks and one-click fix, meshtasticd config generator, GPIO power rails (uConsole AIO), reboot/shutdown |
-| **Settings** | Station identity, mesh stack selection, radio pinout, password, API tokens |
+| **System** | Radio ownership and handover, systemd service control, journal logs, boot overlay checks and one-click fix, meshtasticd config generator, GPIO power rails (uConsole AIO), reboot/shutdown |
+| **Settings** | Station identity, mesh stack handover, radio pinout, password, API tokens |
 
 The SDR demodulator runs **in the browser** from raw 8-bit IQ: the Pi only runs `rtl_tcp`, so the CPU stays free and audio/waterfall latency is low. Sample rates from 240 kS/s to 2.4 MS/s are available; 1.024 MS/s uses roughly 2 MB/s of network bandwidth.
 
@@ -55,9 +55,10 @@ The installer:
 1. installs `rtl-sdr`, `gpsd`, Python, build prerequisites and Node.js 22 when needed,
 2. copies the app to `/opt/signaldeck` and builds the web console,
 3. creates a Python virtualenv with `meshtastic` and `meshcore` bridges,
-4. adds the service user to `gpio`, `spi`, `i2c`, `dialout`, `plugdev`, `audio`, `video`,
-5. installs and starts a hardened `signaldeck.service`,
-6. adds a **narrow** sudoers file (`/etc/sudoers.d/signaldeck`) limited to `hwclock`, `systemctl` for `meshtasticd`/reboot/poweroff, `timedatectl set-ntp`, and config-file copies.
+4. installs [openHop Repeater](https://github.com/openhop-dev/openhop_repeater) so MeshCore can drive the HAT's own SX1262 (skip with `--without-meshcore`),
+5. adds the service user to `gpio`, `spi`, `i2c`, `dialout`, `plugdev`, `audio`, `video`,
+6. installs and starts a hardened `signaldeck.service`,
+7. adds a **narrow** sudoers file (`/etc/sudoers.d/signaldeck`) limited to `hwclock`, `systemctl` for `meshtasticd`/`openhop-repeater`/reboot/poweroff, `timedatectl set-ntp`, and config-file copies.
 
 Options:
 
@@ -65,6 +66,7 @@ Options:
 sudo ./install.sh --port 8080        # HTTP port
 sudo ./install.sh --tls              # self-signed HTTPS on the same port
 sudo ./install.sh --dir /srv/signaldeck --skip-apt
+sudo ./install.sh --without-meshcore   # companion-only MeshCore, no openHop
 ```
 
 Then open `http://<pi-ip>:8080` and create the console password. Nothing else is reachable until that password exists.
@@ -106,6 +108,12 @@ GET    /gps/track | /track.gpx
 GET    /mesh                         both bridge states + stored history
 POST   /mesh/:kind/start | /stop | /send | /command
 PUT    /mesh/:kind/config
+GET    /radio                        current radio owner, daemons and warnings
+POST   /mesh/mode                    { mode, transport } — stops the old owner, starts the new one
+GET    /mesh/native                  openHop state, presets, rendered + installed config
+POST   /mesh/native/provision        write config, start openHop, attach the bridge
+POST   /mesh/native/config | /restart
+PUT    /mesh/native/settings         MeshCore preset, power, node name, companion port
 GET    /time                         system clock, NTP, RTC devices
 POST   /time/sync                    { direction: to-rtc|from-rtc, device }
 GET    /system                       stats, services, hardware detection
@@ -157,7 +165,11 @@ GPS:
 
 SignalDeck's Python bridge connects to `127.0.0.1:4403` and forwards messages, nodes and configuration.
 
-**MeshCore.** SignalDeck attaches to a MeshCore companion over TCP (Wi-Fi companion, `meshcore-pi`, or a small bridge) or USB serial. The SX1262 cannot be owned by meshtasticd and a MeshCore stack simultaneously — pick one under **Settings → Mesh stack**, or run MeshCore against a separate companion radio.
+**MeshCore (standalone).** MeshCore can run on the HAT's own SX1262. `install.sh` installs [openHop Repeater](https://github.com/openhop-dev/openhop_repeater), which owns the radio and exposes a companion endpoint on `127.0.0.1:5000`. SignalDeck generates `/etc/openhop_repeater/config.yaml` from **Settings → Radio wiring** and the MeshCore preset (frequency, bandwidth, spreading factor, coding rate, TCXO and DIO2 switch), including a persistent identity at `/var/lib/openhop_repeater/identity.key`.
+
+Choose **MeshCore — HAT radio** under **Settings → Mesh stack**. SignalDeck stops `meshtasticd`, starts openHop, waits for the companion port, and only then attaches the bridge; switching back stops openHop and restarts `meshtasticd`. The saved choice is re-applied at boot, so exactly one process ever holds the radio. `GET /api/v1/radio` reports the current owner and any conflicts.
+
+An external MeshCore companion over TCP or USB serial is still supported (**MeshCore — external companion**); in that mode SignalDeck leaves the HAT radio free and talks to the companion you point it at.
 
 **RTL-SDR.** The R860 tunes 24 MHz–1.766 GHz. Below 28.8 MHz enable `Direct sampling: Q branch`. The bias tee feeds 5 V up the coax; enable it only for an antenna/LNA that expects power.
 
@@ -200,6 +212,8 @@ sudo ./uninstall.sh --purge  # deletes everything
 | No RTC | `dtoverlay=i2c-rtc,pcf85063a` in config.txt, battery installed, `i2cdetect -y 1` shows `0x51` |
 | meshtasticd won't start | `journalctl -u meshtasticd -b`; verify `spidev1.0`/`spidev0.0` matches the board |
 | Mesh page: Python library missing | `sudo /opt/signaldeck/venv/bin/pip install meshtastic meshcore` |
+| openHop won't start | `journalctl -u openhop-repeater -b`; verify the SPI bus/CS and pins under Settings → Radio wiring, then re-apply the handover |
+| Two mesh stacks running | Open **System → Radio ownership** and pick one stack; SignalDeck stops the other process for you |
 | Password forgotten | Stop the service, delete `auth` from `data/settings.json`, restart, create a new password |
 
 ## Development

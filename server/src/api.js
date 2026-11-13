@@ -13,6 +13,16 @@ import {
   writeMeshtasticdConfig,
 } from './hardware.js';
 import { journal, controlService, powerAction, pythonInfo, serviceStatus, systemStats, allServices } from './system.js';
+import {
+  MESHCORE_PRESETS,
+  nativeSettings,
+  nativeState,
+  readNativeConfig,
+  renderNativeConfig,
+  restartNative,
+  waitForTcp,
+  writeNativeConfig,
+} from './openhop.js';
 import { timeState, syncTime } from './time.js';
 import { addPreset, clearTrack, getState, gpxExport, removePreset, setScanChannels } from './store.js';
 import { clamp, httpError } from './util.js';
@@ -30,7 +40,7 @@ export const BANDS = [
   { id: 'adsb', name: 'ADS-B', start: 1089000000, end: 1091000000, hint: '1090 MHz pulses' },
 ];
 
-export function createApi({ sdr, gps, mesh, hub }) {
+export function createApi({ sdr, gps, mesh, hub, radio }) {
   const router = express.Router();
   let hardwareCache = { at: 0, data: null };
 
@@ -90,11 +100,12 @@ export function createApi({ sdr, gps, mesh, hub }) {
 
   router.get('/overview', wrap(async (req, res) => {
     const settings = getSettings();
-    const [stats, hardware, services, clock] = await Promise.all([
+    const [stats, hardware, services, clock, radioState] = await Promise.all([
       systemStats(),
       hardwareCached(60000),
-      Promise.all(['gpsd', 'meshtasticd', 'signaldeck'].map((unit) => serviceStatus(unit))),
+      Promise.all(['gpsd', 'meshtasticd', 'openhop-repeater', 'signaldeck'].map((unit) => serviceStatus(unit))),
       timeState(gps),
+      radio.status(),
     ]);
     const alerts = [];
     if (!hardware.allConfigured) {
@@ -106,6 +117,18 @@ export function createApi({ sdr, gps, mesh, hub }) {
     if (!services[0].active) alerts.push({ level: 'warn', title: 'gpsd is not running', detail: 'GNSS falls back to direct serial reading.', action: 'system' });
     if (settings.lora.mode === 'meshtastic' && !services[1].active) {
       alerts.push({ level: 'warn', title: 'meshtasticd is not running', detail: 'Start the LoRa daemon to use the mesh.', action: 'meshtastic' });
+    }
+    if (radioState.conflict) {
+      alerts.push({
+        level: 'bad',
+        title: 'Two stacks are holding the radio',
+        detail: 'meshtasticd and openHop Repeater are both running. Switch the mesh stack to release the SX1262.',
+        action: 'settings',
+      });
+    }
+    for (const warning of radioState.warnings || []) {
+      if (radioState.conflict && warning.includes('both running')) continue;
+      alerts.push({ level: 'warn', title: 'Mesh radio', detail: warning, action: 'settings' });
     }
     if (gps.getState().fix === 0) alerts.push({ level: 'info', title: 'GNSS has no fix', detail: 'Give the antenna a clear view of the sky.', action: 'gps' });
     if (stats.disk && stats.disk.percent > 90) alerts.push({ level: 'warn', title: 'Disk almost full', detail: `${stats.disk.percent.toFixed(0)}% used.`, action: 'system' });
@@ -122,6 +145,7 @@ export function createApi({ sdr, gps, mesh, hub }) {
       sdr: sdr.getState(),
       gps: gps.getState(),
       mesh: { mode: settings.lora.mode, meshtastic: mesh.meshtastic.getState(), meshcore: mesh.meshcore.getState() },
+      radio: radioState,
       alerts,
       wsClients: hub.count,
     });
@@ -190,6 +214,8 @@ export function createApi({ sdr, gps, mesh, hub }) {
     res.json({
       mode: getSettings().lora.mode,
       radio: getSettings().lora.radio,
+      ownership: await radio.status(),
+      native: await nativeState(getSettings()),
       meshtastic: { ...mesh.meshtastic.getState(), messages: store.meshtastic.messages, nodes: store.meshtastic.nodes, channels: store.meshtastic.channels, myInfo: store.meshtastic.myInfo },
       meshcore: {
         ...mesh.meshcore.getState(),
@@ -210,7 +236,70 @@ export function createApi({ sdr, gps, mesh, hub }) {
     throw httpError(404, 'Unknown mesh backend.');
   };
 
-  router.post('/mesh/:kind/start', requireSameOrigin, wrap(async (req, res) => res.json(await bridgeFor(req.params.kind).start())));
+  router.get('/radio', wrap(async (req, res) => res.json(await radio.status())));
+
+  router.post('/mesh/mode', requireSameOrigin, wrap(async (req, res) => {
+    res.json(await radio.switchTo(req.body?.mode, req.body?.transport));
+  }));
+
+  router.get('/mesh/native', wrap(async (req, res) => {
+    const settings = getSettings();
+    const position = gps.getState();
+    res.json({
+      state: await nativeState(settings, { probe: true }),
+      settings: settings.lora.meshcore,
+      presets: MESHCORE_PRESETS,
+      rendered: renderNativeConfig(settings, position?.lat != null ? { lat: position.lat, lon: position.lon } : null),
+      text: await readNativeConfig(),
+    });
+  }));
+
+  router.post('/mesh/native/provision', requireSameOrigin, wrap(async (req, res) => {
+    res.json(await radio.switchTo('meshcore', 'native'));
+  }));
+
+  router.post('/mesh/native/config', requireSameOrigin, wrap(async (req, res) => {
+    res.json(await writeNativeConfig(req.body?.text, Boolean(req.body?.restart)));
+  }));
+
+  router.post('/mesh/native/restart', requireSameOrigin, wrap(async (req, res) => {
+    const restarted = await restartNative();
+    const native = nativeSettings(getSettings());
+    const ready = restarted ? await waitForTcp(native.bindAddress, native.tcpPort, 30000) : false;
+    res.json({ ok: restarted, ready, state: await nativeState(getSettings()) });
+  }));
+
+  router.put('/mesh/native/settings', requireSameOrigin, wrap(async (req, res) => {
+    const body = req.body || {};
+    const native = {};
+    if (body.preset) {
+      const preset = MESHCORE_PRESETS.find((item) => item.id === body.preset);
+      if (!preset) throw httpError(400, 'Unknown MeshCore preset.');
+      native.preset = preset.id;
+      native.frequency = preset.frequency;
+      native.bandwidth = preset.bandwidth;
+      native.spreadingFactor = preset.spreadingFactor;
+      native.codingRate = preset.codingRate;
+    }
+    if (body.txPower != null) native.txPower = clamp(Number(body.txPower), 0, 22);
+    if (body.pathHashMode != null) native.pathHashMode = clamp(Number(body.pathHashMode), 0, 3);
+    if (body.nodeName) native.nodeName = String(body.nodeName).slice(0, 40);
+    if (body.tcpPort != null) native.tcpPort = clamp(Number(body.tcpPort), 1024, 65535);
+    updateSettings({ lora: { meshcore: { native } } });
+    await saveSettings();
+
+    const settings = getSettings();
+    let handover = null;
+    if (settings.lora.mode === 'meshcore' && settings.lora.meshcore.transport === 'native') {
+      handover = await radio.switchTo('meshcore', 'native');
+    }
+    res.json({ ok: true, state: await nativeState(getSettings()), handover });
+  }));
+
+  router.post('/mesh/:kind/start', requireSameOrigin, wrap(async (req, res) => {
+    await radio.guard(req.params.kind);
+    res.json(await bridgeFor(req.params.kind).start());
+  }));
   router.post('/mesh/:kind/stop', requireSameOrigin, wrap(async (req, res) => res.json(await bridgeFor(req.params.kind).stop())));
 
   router.post('/mesh/:kind/send', requireSameOrigin, wrap(async (req, res) => {
@@ -252,13 +341,18 @@ export function createApi({ sdr, gps, mesh, hub }) {
     } else {
       const { transport, host, port, serialPath, baud } = req.body || {};
       const mc = getSettings().lora.meshcore;
-      if (transport) mc.transport = transport === 'serial' ? 'serial' : 'tcp';
+      const previous = mc.transport;
+      if (transport) mc.transport = ['serial', 'native', 'tcp'].includes(transport) ? transport : 'tcp';
       if (host) mc.host = String(host).slice(0, 120);
       if (port) mc.port = clamp(Number(port), 1, 65535);
       if (serialPath) mc.serialPath = String(serialPath).slice(0, 120);
       if (baud) mc.baud = clamp(Number(baud), 1200, 921600);
       await saveSettings();
-      res.json({ ok: true, meshcore: mc });
+      let handover = null;
+      if (mc.transport !== previous && (mc.transport === 'native' || previous === 'native')) {
+        handover = await radio.switchTo('meshcore', mc.transport);
+      }
+      res.json({ ok: true, meshcore: mc, handover });
     }
   }));
 
@@ -356,10 +450,12 @@ export function apiIndex(req, res) {
       'GET|POST /api/v1/sdr, /sdr/start, /sdr/stop, /sdr/tune',
       'GET /api/v1/gps, /gps/track, /gps/track.gpx',
       'GET|POST /api/v1/mesh, /mesh/:kind/{start,stop,send,command}',
+      'GET /api/v1/radio, POST /mesh/mode (radio handover)',
+      'GET|POST /api/v1/mesh/native, /mesh/native/{provision,config,restart}',
       'GET /api/v1/time, POST /time/sync',
       'GET /api/v1/system, /system/hardware, POST /system/services/:unit/:action',
       'GET|PUT /api/v1/settings',
-      'WS /ws (channels: status, sdr, sdr-iq, gps, mesh)',
+      'WS /ws (channels: status, sdr, sdr-iq, gps, mesh, radio)',
     ],
   });
 }

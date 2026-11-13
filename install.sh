@@ -7,6 +7,8 @@ APP_DIR="${SIGNALDECK_DIR:-/opt/signaldeck}"
 PORT="${SIGNALDECK_PORT:-8080}"
 WITH_TLS=0
 SKIP_APT=0
+WITH_MESHCORE=1
+OPENHOP_SVC_USER=""
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
@@ -17,6 +19,8 @@ Usage: sudo ./install.sh [options]
   --port PORT    HTTP port (default 8080)
   --tls          Generate a self-signed certificate and serve HTTPS
   --skip-apt     Do not run apt-get (packages already installed)
+  --without-meshcore
+                 Do not install openHop Repeater (native MeshCore on the HAT)
   -h, --help     Show this help
 EOF
 }
@@ -27,6 +31,7 @@ while [ $# -gt 0 ]; do
     --port) PORT="$2"; shift 2 ;;
     --tls) WITH_TLS=1; shift ;;
     --skip-apt) SKIP_APT=1; shift ;;
+    --without-meshcore) WITH_MESHCORE=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 1 ;;
   esac
@@ -111,6 +116,39 @@ sudo -u "$SERVICE_USER" "$APP_DIR/venv/bin/pip" install --quiet --upgrade pip
 sudo -u "$SERVICE_USER" "$APP_DIR/venv/bin/pip" install --quiet \
   meshtastic meshcore pyserial || echo "!! Mesh bridge packages failed to install; radio pages will show a setup hint."
 
+if [ "$WITH_MESHCORE" = "1" ]; then
+  echo "==> Installing the native MeshCore stack (openHop Repeater)"
+  if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+    echo "!! openHop needs Python 3.10+; skipping. MeshCore still works with an external companion."
+  else
+    apt-get install -y --no-install-recommends python3-dev libgpiod2 >/dev/null 2>&1 || true
+    if [ -d /opt/openhop_repeater/.git ]; then
+      git -C /opt/openhop_repeater pull --ff-only >/dev/null 2>&1 || true
+    else
+      rm -rf /opt/openhop_repeater
+      git clone --depth 1 https://github.com/openhop-dev/openhop_repeater.git /opt/openhop_repeater || \
+        echo "!! Could not clone openHop Repeater; MeshCore native mode stays unavailable."
+    fi
+    if [ -f /opt/openhop_repeater/manage.sh ]; then
+      # The installer is non-interactive in current releases. If it asks
+      # anything, EOF lets it keep its defaults; SignalDeck writes config next.
+      ( cd /opt/openhop_repeater && timeout 900 bash ./manage.sh install </dev/null ) || \
+        echo "!! openHop install did not finish; check its output and re-run install.sh."
+      OPENHOP_USER="$(systemctl show -p User --value openhop-repeater 2>/dev/null || true)"
+      OPENHOP_USER="${OPENHOP_USER:-root}"
+      OPENHOP_SVC_USER="$OPENHOP_USER"
+      install -d -m 0755 /etc/openhop_repeater
+      install -d -m 0700 -o "$OPENHOP_USER" -g "$OPENHOP_USER" /var/lib/openhop_repeater 2>/dev/null || \
+        install -d -m 0700 /var/lib/openhop_repeater
+      # SignalDeck owns radio handover, so leave the repeater stopped until
+      # MeshCore is selected in the console.
+      systemctl stop openhop-repeater >/dev/null 2>&1 || true
+      systemctl enable openhop-repeater >/dev/null 2>&1 || true
+      echo "    openHop installed; config is written by SignalDeck on first handover"
+    fi
+  fi
+fi
+
 echo "==> Adding $SERVICE_USER to hardware groups"
 for group in gpio spi i2c dialout plugdev audio video; do
   getent group "$group" >/dev/null && usermod -aG "$group" "$SERVICE_USER" || true
@@ -163,6 +201,8 @@ cat > "$SUDO_FILE" <<EOF
 # SignalDeck: narrow privilege escalation for clock, service and config actions.
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/sbin/hwclock *, /sbin/hwclock *
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart meshtasticd, /usr/bin/systemctl start meshtasticd, /usr/bin/systemctl stop meshtasticd
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart openhop-repeater, /usr/bin/systemctl start openhop-repeater, /usr/bin/systemctl stop openhop-repeater, /usr/bin/systemctl enable openhop-repeater
+$SERVICE_USER ALL=(root) NOPASSWD: /bin/systemctl restart openhop-repeater, /bin/systemctl start openhop-repeater, /bin/systemctl stop openhop-repeater, /bin/systemctl enable openhop-repeater
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl reboot, /usr/bin/systemctl poweroff, /bin/systemctl reboot, /bin/systemctl poweroff
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/timedatectl set-ntp true
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/mkdir -p /etc/meshtasticd
@@ -172,6 +212,14 @@ $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/cp /etc/meshtasticd/config.yaml /etc
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/cp /tmp/signaldeck-* /boot/firmware/config.txt
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/cp /boot/firmware/config.txt /boot/firmware/config.txt.signaldeck-*
 $SERVICE_USER ALL=(root) NOPASSWD: /bin/cp /tmp/signaldeck-* /etc/meshtasticd/config.yaml
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/mkdir -p /etc/openhop_repeater
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/test -f /etc/openhop_repeater/config.yaml
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/cp /tmp/signaldeck-* /etc/openhop_repeater/config.yaml
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/cp /etc/openhop_repeater/config.yaml /etc/openhop_repeater/config.yaml.signaldeck-*
+$SERVICE_USER ALL=(root) NOPASSWD: /bin/cp /tmp/signaldeck-* /etc/openhop_repeater/config.yaml
+$SERVICE_USER ALL=(root) NOPASSWD: /bin/cp /etc/openhop_repeater/config.yaml /etc/openhop_repeater/config.yaml.signaldeck-*
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/chown ${OPENHOP_SVC_USER:-root} /etc/openhop_repeater/config.yaml
+$SERVICE_USER ALL=(root) NOPASSWD: /bin/chown ${OPENHOP_SVC_USER:-root} /etc/openhop_repeater/config.yaml
 $SERVICE_USER ALL=(root) NOPASSWD: /bin/cp /tmp/signaldeck-* /boot/firmware/config.txt
 EOF
 chmod 0440 "$SUDO_FILE"
@@ -191,4 +239,5 @@ echo "   Logs    : journalctl -u signaldeck -f"
 echo
 echo " Open the web page to create the console password."
 echo " Radio setup: System → HAT interfaces, then Settings → Radio wiring."
+echo " Mesh stack: Settings → Mesh stack hands the SX1262 between Meshtastic and MeshCore."
 echo "=============================================================="

@@ -110,7 +110,7 @@ export async function systemStats() {
   };
 }
 
-const ALLOWED_SERVICES = ['gpsd', 'meshtasticd', 'signaldeck', 'chrony', 'chronyd', 'ssh', 'tailscaled', 'avahi-daemon'];
+const ALLOWED_SERVICES = ['gpsd', 'meshtasticd', 'openhop-repeater', 'signaldeck', 'chrony', 'chronyd', 'ssh', 'tailscaled', 'avahi-daemon'];
 
 export async function serviceStatus(unit) {
   if (!isLinux) return { unit, active: false, state: 'unsupported', enabled: false, description: 'Not available on this platform' };
@@ -140,7 +140,11 @@ export async function allServices() {
 export async function controlService(unit, action) {
   if (!ALLOWED_SERVICES.includes(unit)) throw Object.assign(new Error(`Service ${unit} is not managed by SignalDeck.`), { status: 400 });
   if (!['start', 'stop', 'restart'].includes(action)) throw Object.assign(new Error('Unsupported action.'), { status: 400 });
-  const res = await run('systemctl', [action, unit], { timeout: 20000 });
+  // The service runs as an unprivileged user, so unit changes go through the
+  // narrow sudoers rules written by install.sh.
+  const command = process.getuid?.() === 0 ? 'systemctl' : 'sudo';
+  const args = process.getuid?.() === 0 ? [action, unit] : ['-n', 'systemctl', action, unit];
+  const res = await run(command, args, { timeout: 20000 });
   const status = await serviceStatus(unit);
   return { ok: res.ok, output: res.stderr || res.stdout, status };
 }

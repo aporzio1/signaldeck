@@ -28,6 +28,11 @@ export function Dashboard() {
   const meshtastic = mesh?.meshtastic;
   const lastMessage = meshtastic?.messages?.[meshtastic.messages.length - 1];
   const nodes = meshtastic?.nodes || [];
+  const isMeshCore = overview?.mesh?.mode === 'meshcore';
+  const meshcore = mesh?.meshcore;
+  const bridge = isMeshCore ? meshcore : meshtastic;
+  const meshNodes = isMeshCore ? meshcore?.contacts || [] : nodes;
+  const lastActive = isMeshCore ? meshcore?.messages?.[(meshcore?.messages?.length || 0) - 1] : lastMessage;
   const rtc = clocks?.rtc?.find((r: any) => r.device === hardware?.rtcPreferred) || clocks?.rtc?.[0];
   const ntp = clocks?.ntp;
 
@@ -125,43 +130,55 @@ export function Dashboard() {
         </Card>
 
         <Card
-          title={overview.mesh?.mode === 'meshcore' ? 'MeshCore' : 'Meshtastic'}
+          title={isMeshCore ? 'MeshCore' : 'Meshtastic'}
           subtitle={
-            meshtastic?.running
-              ? `Linked to meshtasticd · ${nodes.length} node${nodes.length === 1 ? '' : 's'} known`
+            bridge?.running
+              ? isMeshCore
+                ? `${meshcore?.transport === 'native' ? 'Native openHop on the HAT radio' : 'External companion'} · ${meshNodes.length} contact${meshNodes.length === 1 ? '' : 's'}`
+                : `Linked to meshtasticd · ${nodes.length} node${nodes.length === 1 ? '' : 's'} known`
               : 'Bridge not connected'
           }
-          actions={<Badge tone={meshtastic?.running ? 'good' : 'warn'} dot>{meshtastic?.running ? 'Online' : 'Offline'}</Badge>}
+          actions={<Badge tone={bridge?.running ? 'good' : 'warn'} dot>{bridge?.running ? 'Online' : 'Offline'}</Badge>}
         >
           <div className="stack">
             <div className="row" style={{ gap: 18 }}>
-              <Stat label="Nodes" value={nodes.length} />
-              <Stat label="Channel" value={meshtastic?.channels?.find((c: any) => c.name)?.name || 'Primary'} size="sm" />
-              <Stat label="Last heard" value={lastMessage ? fmtAgo(lastMessage.time * 1000) : '—'} size="sm" />
+              <Stat label={isMeshCore ? 'Contacts' : 'Nodes'} value={meshNodes.length} />
+              <Stat
+                label="Channel"
+                value={
+                  (isMeshCore ? meshcore?.channels : meshtastic?.channels)?.find((channel: any) => channel.name)?.name || 'Primary'
+                }
+                size="sm"
+              />
+              <Stat label="Last heard" value={lastActive ? fmtAgo((lastActive.time || 0) * 1000) : '—'} size="sm" />
             </div>
-            {lastMessage ? (
+            {lastActive ? (
               <div className="hint-box">
                 <div className="row tight" style={{ marginBottom: 3 }}>
-                  <strong className="small">{lastMessage.fromName || lastMessage.from}</strong>
-                  <span className="dim tiny">{fmtTime(lastMessage.time * 1000)}</span>
+                  <strong className="small">{lastActive.fromName || lastActive.from}</strong>
+                  <span className="dim tiny">{fmtTime((lastActive.time || 0) * 1000)}</span>
                 </div>
-                <div className="small">{lastMessage.text}</div>
+                <div className="small">{lastActive.text}</div>
               </div>
             ) : (
               <div className="dim small">No messages yet. Start the bridge to join the mesh.</div>
             )}
             <div className="row">
-              <a className="btn" href="#/meshtastic">
+              <a className="btn" href={isMeshCore ? '#/meshcore' : '#/meshtastic'}>
                 <Icon name="message" size={15} /> Open messages
               </a>
               <Button
                 size="sm"
                 busy={busy === 'mesh'}
                 onClick={() =>
-                  act('mesh', () => api.post(`/mesh/meshtastic/${meshtastic?.running ? 'stop' : 'start'}`), 'Bridge toggled')
+                  act(
+                    'mesh',
+                    () => api.post(`/mesh/${isMeshCore ? 'meshcore' : 'meshtastic'}/${bridge?.running ? 'stop' : 'start'}`),
+                    'Bridge toggled',
+                  )
                 }
               >
-                {meshtastic?.running ? 'Disconnect' : 'Connect'}
+                {bridge?.running ? 'Disconnect' : 'Connect'}
               </Button>
             </div>
           </div>
@@ -269,6 +286,8 @@ export function Dashboard() {
           <div className="kv">
             <dt>Mode</dt>
             <dd>{mesh?.mode || 'meshtastic'}</dd>
+            <dt>Radio owner</dt>
+            <dd>{overview.radio?.ownerLabel || '—'}</dd>
             <dt>Region</dt>
             <dd>{mesh?.radio?.region ?? '—'}</dd>
             <dt>Preset</dt>
@@ -284,6 +303,9 @@ export function Dashboard() {
           </div>
           <div className="divider" />
           <div className="row tight">
+            <Badge tone={overview.radio?.conflict ? 'bad' : overview.radio?.owner === 'none' ? 'warn' : 'good'} dot>
+              {overview.radio?.conflict ? 'Two stacks running' : overview.radio?.owner === 'none' ? 'Radio idle' : 'Radio owned'}
+            </Badge>
             <Badge tone={meshtastic?.myInfo ? 'good' : ''} dot>{meshtastic?.myInfo?.longName || 'No node info'}</Badge>
             <a className="btn btn-ghost btn-sm" href="#/settings">Configure</a>
           </div>

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
-import { fmtAgo, fmtTime } from '../format';
+import { fmtAgo, fmtHz, fmtTime } from '../format';
 import { Badge, Button, Card, Empty, Field, Select, Stat, Tabs, toast } from '../ui';
 import { live } from '../ws';
 
@@ -96,6 +96,19 @@ export function MeshCorePage() {
     }
   };
 
+  const takeover = async () => {
+    setBusy('takeover');
+    try {
+      await api.post('/mesh/mode', { mode: 'meshcore', transport: 'native' });
+      await refresh();
+      toast('Radio handed to MeshCore', 'good');
+    } catch (error: any) {
+      toast(error.message, 'bad');
+    } finally {
+      setBusy('');
+    }
+  };
+
   const command = async (cmd: string, message: string) => {
     setBusy(cmd);
     try {
@@ -117,7 +130,8 @@ export function MeshCorePage() {
         <div>
           <h1 className="page-title">MeshCore</h1>
           <p className="page-desc">
-            Companion, room-server and repeater messaging. SignalDeck attaches to a MeshCore companion over TCP or serial.
+            Companion, room-server and repeater messaging — either natively on the HAT's SX1262 (openHop Repeater) or through an
+            external companion over TCP/serial.
           </p>
         </div>
         <div className="row">
@@ -132,6 +146,17 @@ export function MeshCorePage() {
 
       {meshcore?.lastError && <div className="alert warn small">{meshcore.lastError}</div>}
 
+      {data.mode !== 'meshcore' && (
+        <div className="alert warn small">
+          <span className="grow">
+            The HAT radio is currently owned by {data.mode}. MeshCore needs a handover before it can transmit.
+          </span>
+          <Button size="sm" variant="primary" busy={busy === 'takeover'} onClick={takeover}>
+            Take over radio
+          </Button>
+        </div>
+      )}
+
       <div className="grid three">
         <Card><Stat label="Identity" value={self?.name || self?.adv_name || '—'} hint={self?.public_key ? String(self.public_key).slice(0, 18) + '…' : ''} size="sm" /></Card>
         <Card><Stat label="Contacts" value={contacts.length} hint={`${channels.length} channels`} /></Card>
@@ -142,8 +167,8 @@ export function MeshCorePage() {
         <Card title="Companion endpoint" subtitle="MeshCore is not connected">
           <div className="stack small">
             <p className="muted">
-              Point SignalDeck at a USB-serial companion, a Wi-Fi companion on TCP, or a local
-              <span className="code"> meshcore-pi</span> instance bound to the HAT radio.
+              Point SignalDeck at a USB-serial companion, a Wi-Fi companion on TCP, or run the native stack on the HAT's own
+              SX1262. Native mode uses openHop Repeater and needs no second radio.
             </p>
             <div className="row tight">
               <Badge tone={data.python?.meshcore ? 'good' : 'bad'} dot>
@@ -243,11 +268,53 @@ export function MeshCorePage() {
                   value={data.meshcore?.transport || 'tcp'}
                   onChange={(value) => setData((prev: any) => ({ ...prev, meshcore: { ...prev.meshcore, transport: value } }))}
                   options={[
+                    { value: 'native', label: 'Native HAT radio (openHop)' },
                     { value: 'tcp', label: 'TCP (Wi-Fi companion)' },
                     { value: 'serial', label: 'USB serial' },
                   ]}
                 />
               </Field>
+              {data.meshcore?.transport === 'native' && (
+                <div className="hint-box small">
+                  <div className="row tight">
+                    <Badge tone={data.native?.active ? 'good' : 'warn'} dot>
+                      openHop {data.native?.active ? 'running' : data.native?.installed ? 'stopped' : 'not installed'}
+                    </Badge>
+                    <Badge>companion :{data.native?.companion?.port || 5000}</Badge>
+                    <Badge>{String(data.native?.preset || '').toUpperCase()}</Badge>
+                  </div>
+                  <div className="dim tiny" style={{ marginTop: 6 }}>
+                    {data.native?.nodeName} · {fmtHz(data.native?.frequency)} · SF{data.native?.spreadingFactor} ·{' '}
+                    {data.native?.txPower} dBm
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <Field label="MeshCore preset" hint="Sets frequency, bandwidth, spreading factor and coding rate.">
+                      <Select
+                        value={data.native?.preset || 'us'}
+                        disabled={busy === 'native-preset'}
+                        onChange={async (value) => {
+                          setBusy('native-preset');
+                          try {
+                            await api.put('/mesh/native/settings', { preset: value });
+                            await refresh();
+                            toast('MeshCore radio preset applied', 'good');
+                          } catch (error: any) {
+                            toast(error.message, 'bad');
+                          } finally {
+                            setBusy('');
+                          }
+                        }}
+                        options={(data.native?.presets || []).map((preset: any) => ({ value: preset.id, label: preset.label }))}
+                      />
+                    </Field>
+                  </div>
+                  <div className="row tight" style={{ marginTop: 8 }}>
+                    <Button size="sm" busy={busy === 'takeover'} onClick={takeover}>
+                      Apply & take over radio
+                    </Button>
+                  </div>
+                </div>
+              )}
               <div className="form-row">
                 <Field label="Host">
                   <input className="input mono" defaultValue="127.0.0.1" onChange={(event) => setForm({ ...form, host: event.target.value })} />
@@ -269,11 +336,13 @@ export function MeshCorePage() {
                   variant="primary"
                   onClick={async () => {
                     try {
-                      await api.put('/mesh/meshcore/config', { ...form, transport: data.meshcore?.transport });
-                      await api.post('/mesh/meshcore/stop');
-                      await api.post('/mesh/meshcore/start');
+                      const result = await api.put('/mesh/meshcore/config', { ...form, transport: data.meshcore?.transport });
+                      if (!result.handover) {
+                        await api.post('/mesh/meshcore/stop');
+                        await api.post('/mesh/meshcore/start');
+                      }
                       await refresh();
-                      toast('Endpoint updated', 'good');
+                      toast(result.handover ? 'Radio handed over to MeshCore' : 'Endpoint updated', 'good');
                     } catch (error: any) {
                       toast(error.message, 'bad');
                     }

@@ -63,6 +63,10 @@ export class MeshSidecar extends EventEmitter {
     if (mc.transport === 'serial') {
       return ['--serial', String(mc.serialPath || '/dev/ttyACM0'), '--baud', String(mc.baud || 115200)];
     }
+    if (mc.transport === 'native') {
+      const native = mc.native || {};
+      return ['--host', String(native.bindAddress || '127.0.0.1'), '--port', String(native.tcpPort || mc.port || 5000)];
+    }
     return ['--host', String(mc.host || '127.0.0.1'), '--port', String(mc.port || 5000)];
   }
 

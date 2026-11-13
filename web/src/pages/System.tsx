@@ -3,7 +3,7 @@ import { api } from '../api';
 import { fmtBytes, fmtDuration } from '../format';
 import { Badge, Button, Card, Empty, Field, Modal, Select, Stat, Toggle, toast } from '../ui';
 
-const UNITS = ['gpsd', 'meshtasticd', 'signaldeck', 'chrony', 'ssh', 'tailscaled'];
+const UNITS = ['gpsd', 'meshtasticd', 'openhop-repeater', 'signaldeck', 'chrony', 'ssh', 'tailscaled'];
 
 export function SystemPage() {
   const [data, setData] = useState<any>(null);
@@ -16,9 +16,11 @@ export function SystemPage() {
   const [msdText, setMsdText] = useState('');
   const [rails, setRails] = useState(true);
   const [logLines, setLogLines] = useState('200');
+  const [radio, setRadio] = useState<any>(null);
 
-  const load = () =>
-    api.get('/system').then((payload) => {
+  const load = () => {
+    api.get('/radio').then(setRadio).catch(() => {});
+    return api.get('/system').then((payload) => {
       setData(payload);
       if (!msd) {
         api.get('/system/meshtasticd').then((config) => {
@@ -27,6 +29,7 @@ export function SystemPage() {
         }).catch(() => {});
       }
     }).catch((error) => toast(error.message, 'bad'));
+  };
 
   useEffect(() => {
     load();
@@ -45,6 +48,22 @@ export function SystemPage() {
     try {
       await api.post(`/system/services/${unit}/${action}`);
       toast(`${unit} ${action}ed`, 'good');
+      await load();
+    } catch (error: any) {
+      toast(error.message, 'bad');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const handover = async (mode: string, transport?: string) => {
+    setBusy(`radio-${mode}`);
+    try {
+      const result = await api.post('/mesh/mode', { mode, transport });
+      toast(
+        result.warnings?.length ? `Switched with ${result.warnings.length} warning(s)` : `Radio handed to ${mode}`,
+        result.warnings?.length ? 'bad' : 'good',
+      );
       await load();
     } catch (error: any) {
       toast(error.message, 'bad');
@@ -75,6 +94,61 @@ export function SystemPage() {
         <Card><Stat label="Uptime" value={fmtDuration(stats?.uptime)} hint={hardware?.os?.name} size="sm" /></Card>
         <Card><Stat label="Kernel" value={stats?.platform?.replace(/^Linux\s*/, 'Linux ')} size="sm" hint={`${stats?.cpu?.cores} cores · ${fmtBytes(stats?.memory?.total)}`} /></Card>
       </div>
+
+      <Card
+        title="Radio ownership"
+        subtitle="One process at a time drives the HAT's SX1262"
+        actions={<Badge tone={radio?.conflict ? 'bad' : radio?.owner === 'none' ? 'warn' : 'good'} dot>{radio?.ownerLabel || 'Unknown'}</Badge>}
+      >
+        <div className="stack">
+          <div className="grid three tight">
+            <div className="hint-box">
+              <div className="tiny dim">meshtasticd</div>
+              <div className="small">{radio?.meshtasticd?.active ? 'running' : 'stopped'}</div>
+            </div>
+            <div className="hint-box">
+              <div className="tiny dim">openHop Repeater</div>
+              <div className="small">
+                {radio?.native?.installed ? (radio.native.active ? 'running' : 'installed, stopped') : 'not installed'}
+              </div>
+            </div>
+            <div className="hint-box">
+              <div className="tiny dim">MeshCore bridge</div>
+              <div className="small">{radio?.bridges?.meshcore?.status || 'stopped'}</div>
+            </div>
+          </div>
+          <div className="row">
+            <Button
+              size="sm"
+              variant={radio?.mode === 'meshtastic' ? 'primary' : ''}
+              busy={busy === 'radio-meshtastic'}
+              onClick={() => handover('meshtastic')}
+            >
+              Use Meshtastic
+            </Button>
+            <Button
+              size="sm"
+              variant={radio?.mode === 'meshcore' && radio?.transport === 'native' ? 'primary' : ''}
+              busy={busy === 'radio-meshcore'}
+              onClick={() => handover('meshcore', 'native')}
+            >
+              Use MeshCore on the HAT radio
+            </Button>
+            <a className="btn btn-sm btn-ghost" href="#/meshcore">MeshCore setup</a>
+          </div>
+          {radio?.warnings?.length > 0 && (
+            <div className="hint-box small">
+              {radio.warnings.map((warning: string, index: number) => (
+                <div key={index} className="dim tiny">• {warning}</div>
+              ))}
+            </div>
+          )}
+          <div className="dim tiny">
+            A switch stops the owning daemon, applies its radio configuration, restarts the new owner and waits for its
+            endpoint before reattaching the bridge. The saved choice is re-applied on boot.
+          </div>
+        </div>
+      </Card>
 
       <Card
         title="Radio services"
