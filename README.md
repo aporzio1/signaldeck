@@ -216,6 +216,7 @@ sudo ./uninstall.sh --purge  # deletes everything
 | meshtasticd won't start | `journalctl -u meshtasticd -b`; verify `spidev1.0`/`spidev0.0` matches the board |
 | Mesh page: Python library missing | `sudo /opt/signaldeck/venv/bin/pip install meshtastic meshcore` |
 | openHop won't start | `journalctl -u openhop-repeater -b`; verify the SPI bus/CS and pins under Settings → Radio wiring, then re-apply the handover |
+| Native MeshCore refuses to apply ("Cannot read /etc/openhop_repeater/config.yaml") | Re-run `sudo ./install.sh` to refresh the sudoers rules. SignalDeck will not regenerate a config it cannot read, because doing so would rotate the node identity |
 | Two mesh stacks running | Open **System → Radio ownership** and pick one stack; SignalDeck stops the other process for you |
 | Password forgotten | Stop the service, delete `auth` from `data/settings.json`, restart, create a new password |
 

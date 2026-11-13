@@ -158,12 +158,25 @@ export function renderNativeConfig(settings = getSettings(), position = null, pr
   return lines.join('\n');
 }
 
+/**
+ * Read the installed config even after it has been handed to openHop's service
+ * user (mode 0600). Without the privileged fallback a regeneration would look
+ * like a fresh install and rotate the node identity.
+ */
 export async function readNativeConfig() {
-  return (await readText(OPENHOP.configPath, 256 * 1024)) || '';
+  const direct = await readText(OPENHOP.configPath, 256 * 1024);
+  if (direct != null) return direct;
+  if (!isLinux) return '';
+  const res = await run('sudo', ['-n', 'cat', OPENHOP.configPath], { timeout: 6000, maxBuffer: 1024 * 1024 });
+  return res.ok ? res.stdout : '';
 }
 
-export function configExists() {
-  return fs.existsSync(OPENHOP.configPath);
+export async function configExists() {
+  if (fs.existsSync(OPENHOP.configPath)) return true;
+  if (!isLinux) return false;
+  // The config directory may itself be unreadable to the SignalDeck user.
+  const res = await run('sudo', ['-n', 'test', '-f', OPENHOP.configPath], { timeout: 5000 });
+  return res.ok;
 }
 
 export async function waitForTcp(host, port, timeoutMs = 20000) {

@@ -356,9 +356,11 @@ export function MeshCorePage() {
                         <Badge tone={nativeResult.applied ? 'good' : nativeResult.pending ? 'warn' : 'bad'} dot>
                           {nativeResult.applied
                             ? 'Applied & restarted'
-                            : nativeResult.pending
-                              ? 'Saved for next handover'
-                              : 'Not applied'}
+                            : nativeResult.configError
+                              ? 'Config unchanged — identity protected'
+                              : nativeResult.pending
+                                ? 'Saved for next handover'
+                                : 'Not applied'}
                         </Badge>
                         {nativeResult.preservedIdentity && <Badge tone="info">identity preserved</Badge>}
                         {nativeResult.backup && <Badge>backup kept</Badge>}
