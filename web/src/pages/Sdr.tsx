@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { DEMODS, SAMPLE_RATES, fmtHz, fmtHzLong, fmtMHz } from '../format';
 import { Icon } from '../icons';
-import { SdrEngine } from '../sdr/engine';
+import { getEngine } from '../sdr/shared';
 import { live } from '../ws';
 import { Badge, Button, Card, Empty, Field, Modal, Select, Slider, Tabs, Toggle, toast } from '../ui';
 
@@ -50,7 +50,7 @@ export function SdrPage() {
   const [deviceInfo, setDeviceInfo] = useState<any>(null);
   const [autoGain, setAutoGain] = useState(true);
 
-  const engineRef = useRef<SdrEngine | null>(null);
+  const engineRef = useRef<ReturnType<typeof getEngine> | null>(null);
   const [recorderError, setRecorderError] = useState('');
   const spectrumRef = useRef<{ bins: Float32Array; sampleRate: number; at: number } | null>(null);
   const specCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -84,9 +84,9 @@ export function SdrPage() {
     return unsubscribe;
   }, []);
 
-  // engine lifecycle
+  // engine lifecycle: shared across pages so audio survives navigation
   useEffect(() => {
-    const engine = new SdrEngine();
+    const engine = getEngine();
     engineRef.current = engine;
     engine.onSpectrum = (bins, sampleRate) => {
       binsRef.current = bins;
@@ -100,7 +100,8 @@ export function SdrPage() {
     };
     engine.start();
     return () => {
-      engine.destroy();
+      engine.onSpectrum = null;
+      engine.onMeter = null;
       engineRef.current = null;
     };
   }, []);

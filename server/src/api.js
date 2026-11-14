@@ -24,7 +24,8 @@ import {
   writeNativeConfig,
 } from './openhop.js';
 import { timeState, syncTime } from './time.js';
-import { addPreset, clearTrack, getState, gpxExport, removePreset, setScanChannels } from './store.js';
+import { addPreset, clearTrack, getState, gpxExport, removePreset, scheduleSave, setScanChannels } from './store.js';
+import { addRepeater, listRepeaters, location as repeaterLocation, removeRepeater, setLocation } from './repeaters.js';
 import { clamp, httpError } from './util.js';
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -183,6 +184,28 @@ export function createApi({ sdr, gps, mesh, hub, radio }) {
   });
 
   router.get('/gps', (req, res) => res.json({ state: gps.getState(), settings: getSettings().gps }));
+
+  router.get('/repeaters', wrap(async (req, res) => {
+    const q = req.query;
+    const stored = repeaterLocation();
+    const lat = q.lat !== undefined ? Number(q.lat) : stored?.lat;
+    const lon = q.lon !== undefined ? Number(q.lon) : stored?.lon;
+    res.json(await listRepeaters({
+      lat,
+      lon,
+      radiusMi: q.radius,
+      sourceUrl: getState().repeaterSource || '',
+    }));
+  }));
+  router.post('/repeaters', requireSameOrigin, (req, res) => res.json(addRepeater(req.body || {})));
+  router.delete('/repeaters/:id', requireSameOrigin, (req, res) => res.json(removeRepeater(req.params.id)));
+  router.put('/repeaters/location', requireSameOrigin, (req, res) => res.json(setLocation(req.body || {})));
+  router.put('/repeaters/source', requireSameOrigin, (req, res) => {
+    const state = getState();
+    state.repeaterSource = String((req.body || {}).url || '').slice(0, 500);
+    scheduleSave();
+    return res.json({ url: state.repeaterSource });
+  });
   router.post('/gps/config', requireSameOrigin, wrap(async (req, res) => {
     const patch = req.body || {};
     const allowed = {};
