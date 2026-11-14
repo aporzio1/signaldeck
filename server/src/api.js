@@ -169,6 +169,9 @@ export function createApi({ sdr, gps, mesh, hub, radio }) {
   router.post('/sdr/stop', requireSameOrigin, wrap(async (req, res) => {
     res.json(await sdr.stop());
   }));
+  router.post('/sdr/squelch', requireSameOrigin, wrap(async (req, res) => {
+    res.json(sdr.setSquelch(req.body?.value ?? req.body?.squelch ?? 0));
+  }));
   router.post('/sdr/tune', requireSameOrigin, wrap(async (req, res) => {
     res.json(await sdr.tune(req.body || {}));
   }));

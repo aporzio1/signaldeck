@@ -93,6 +93,7 @@ function wireSdr() {
   sdr.iqConsumers = () => hub.iqSubscribers();
   sdr.on('audio', (frame) => hub.publish('audio', { pcm: Buffer.from(frame.pcm).toString('base64'), rate: frame.rate }));
   sdr.on('audio-config', (cfg) => hub.publish('audio', { config: cfg }));
+  sdr.on('audio-gate', (gate) => hub.publish('audio-gate', gate));
   sdr.on('state', (state) => hub.publish('sdr', state));
 }
 

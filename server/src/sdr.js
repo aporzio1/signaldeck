@@ -228,6 +228,8 @@ export class SdrService extends EventEmitter {
       String(sdr.demod || 'nfm'),
       (pcm, rate) => this.emit('audio', { pcm: pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength), rate }),
     );
+    this.audioDemod.onGate = (gate) => this.emit('audio-gate', gate);
+    this.audioDemod.setSquelch(Number(sdr.squelch) || 0);
     this.emit('audio-config', { rate: this.audioDemod.outRate, demod: String(sdr.demod || 'nfm') });
     socket.setNoDelay(true);
     socket.on('data', (data) => {
@@ -320,6 +322,17 @@ export class SdrService extends EventEmitter {
       this.lastBytesAt = now;
     }
     this.emit('iq', buffer);
+  }
+
+/** Squelch is a shared-stream decision: one threshold, every listener. */
+  setSquelch(value) {
+    const settings = getSettings();
+    const next = Number(value);
+    settings.sdr.squelch = Number.isFinite(next) && next > 0 ? Math.min(next, 0.9) : 0;
+    saveSettings().catch(() => {});
+    const gate = this.audioDemod?.setSquelch(settings.sdr.squelch) ?? null;
+    this.emit('state', this.getState());
+    return { squelch: settings.sdr.squelch, gate };
   }
 
   async tune({ frequency, sampleRate, gainMode, gain, ppm, biasTee, directSampling, agc, offsetTuning, demod }) {
