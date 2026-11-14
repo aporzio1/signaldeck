@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DATA_DIR, ROOT, VERSION } from './config.js';
 import { isLinux, isMac, readText, run, which } from './util.js';
+import { pisugarStatus } from './pisugar.js';
 
 let lastCpu = null;
 
@@ -102,6 +103,7 @@ export async function systemStats() {
     temperature: await cpuTemperature(),
     network: networkInfo(),
     power: await throttleInfo(),
+    battery: await pisugarStatus(),
     node: process.version,
     pid: process.pid,
     dataDir: DATA_DIR,

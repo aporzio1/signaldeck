@@ -93,6 +93,9 @@ export function SystemPage() {
         <Card><Stat label="Model" value={hardware?.isPi ? 'Raspberry Pi' : 'Host'} hint={hardware?.model} size="sm" /></Card>
         <Card><Stat label="Uptime" value={fmtDuration(stats?.uptime)} hint={hardware?.os?.name} size="sm" /></Card>
         <Card><Stat label="Kernel" value={stats?.platform?.replace(/^Linux\s*/, 'Linux ')} size="sm" hint={`${stats?.cpu?.cores} cores · ${fmtBytes(stats?.memory?.total)}`} /></Card>
+        {stats?.battery?.present && (
+          <Card><Stat label={stats.battery.model} value={`${Math.round(stats.battery.percent ?? 0)}%`} hint={`${(stats.battery.volts ?? 0).toFixed(2)} V · ${stats.battery.plugged ? 'charging' : 'on battery'}`} size="sm" /></Card>
+        )}
       </div>
 
       <Card
