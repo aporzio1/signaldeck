@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import net from 'node:net';
 import { IqPacer } from './iq-pacer.js';
+import { AudioDemod } from './audio-demod.js';
 import { getSettings, saveSettings } from './config.js';
 import { logger } from './log.js';
 import { clamp, isLinux, sleep, which } from './util.js';
@@ -210,6 +211,15 @@ export class SdrService extends EventEmitter {
     const socket = this.socket;
     const pacer = new IqPacer(Number(sdr.sampleRate) || 1024000, (buf) => this.emitIq(buf), () => this.iqConsumers?.() ?? 1);
     this.iqPacer = pacer;
+    // Audio is demodulated on the Pi, not in the browser: Safari's worker audio
+    // path stuttered where Chrome's did not; client tuning has no business on
+    // the listener's machine. Streams ~130 KB/s of PCM to subscribers.
+    this.audioDemod = new AudioDemod(
+      Number(sdr.sampleRate) || 1024000,
+      String(sdr.demod || 'nfm'),
+      (pcm, rate) => this.emit('audio', { pcm: pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength), rate }),
+    );
+    this.emit('audio-config', { rate: this.audioDemod.outRate, demod: String(sdr.demod || 'nfm') });
     socket.setNoDelay(true);
     socket.on('data', (data) => {
       let buf = data;
@@ -227,11 +237,15 @@ export class SdrService extends EventEmitter {
         remainder = Buffer.from(buf.subarray(buf.length - 1));
         buf = buf.subarray(0, buf.length - 1);
       }
-      if (buf.length) pacer.push(buf);
+      if (buf.length) {
+        pacer.push(buf);
+        this.audioDemod?.push(buf);
+      }
     });
     socket.on('close', () => {
       pacer.stop();
       if (this.iqPacer === pacer) this.iqPacer = null;
+      this.audioDemod = null;
       if (this.state.running) {
         this.state.running = false;
         this.state.lastError = 'rtl_tcp connection closed';
@@ -310,6 +324,7 @@ export class SdrService extends EventEmitter {
       this.state.frequency = freq;
       settings.sdr.frequency = freq;
       this.send(CMD.SET_FREQ, freq);
+      this.audioDemod?.drop(); // stale-frequency audio must not drain after a retune
     }
     if (sampleRate != null && Number(sampleRate) !== this.state.sampleRate) {
       const rate = Math.round(Number(sampleRate));
@@ -323,6 +338,8 @@ export class SdrService extends EventEmitter {
       } else {
         this.send(CMD.SET_SAMPLE_RATE, rate);
         this.iqPacer?.setRate(rate);
+        this.audioDemod?.configure(rate, this.state.demod);
+        this.emit('audio-config', { rate: this.audioDemod.outRate, demod: this.state.demod });
       }
       this.state.sampleRate = Math.min(rate, this.state.source === 'mock' ? MOCK_RATE_CAP : rate);
       settings.sdr.sampleRate = rate;
@@ -365,6 +382,8 @@ export class SdrService extends EventEmitter {
     if (demod != null) {
       this.state.demod = String(demod);
       settings.sdr.demod = this.state.demod;
+      this.audioDemod?.configure(this.state.sampleRate, this.state.demod);
+      this.emit('audio-config', { rate: this.audioDemod.outRate, demod: this.state.demod });
     }
     saveSettings().catch(() => {});
     this.emit('state', this.getState());
@@ -379,6 +398,7 @@ export class SdrService extends EventEmitter {
     this.mockTimer = null;
     this.iqPacer?.stop();
     this.iqPacer = null;
+    this.audioDemod = null;
     if (this.socket) {
       this.socket.removeAllListeners();
       this.socket.destroy();

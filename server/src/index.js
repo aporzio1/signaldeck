@@ -4,6 +4,7 @@ import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
 import { WEB_DIST, VERSION, ensureDataDir, getSettings } from './config.js';
+import { createTileCache } from './tiles.js';
 import { apiIndex, createApi, errorHandler } from './api.js';
 import { GpsService } from './gps.js';
 import { logger } from './log.js';
@@ -34,6 +35,9 @@ app.use((req, res, next) => {
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   next();
 });
+
+const tiles = createTileCache(path.join(ensureDataDir(), 'tiles'));
+app.use('/tiles', tiles.handler);
 
 app.use('/api/v1', createApi({ sdr, gps, mesh, hub, radio }));
 app.get('/api', apiIndex);
@@ -87,6 +91,8 @@ hub.attach(server);
 function wireSdr() {
   sdr.on('iq', (buffer) => hub.publishIq(buffer));
   sdr.iqConsumers = () => hub.iqSubscribers();
+  sdr.on('audio', (frame) => hub.publish('audio', { pcm: Buffer.from(frame.pcm).toString('base64'), rate: frame.rate }));
+  sdr.on('audio-config', (cfg) => hub.publish('audio', { config: cfg }));
   sdr.on('state', (state) => hub.publish('sdr', state));
 }
 
