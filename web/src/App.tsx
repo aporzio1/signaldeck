@@ -6,6 +6,8 @@ import { GpsPage } from './pages/Gps';
 import { MeshCorePage } from './pages/MeshCore';
 import { MeshtasticPage } from './pages/Meshtastic';
 import { SdrPage } from './pages/Sdr';
+import { RepeatersPage } from './pages/Repeaters';
+import { PlayerBar } from './components/PlayerBar';
 import { SettingsPage } from './pages/Settings';
 import { SystemPage } from './pages/System';
 import { TimePage } from './pages/Time';
@@ -15,6 +17,7 @@ import { Badge, Button, Toaster, toast } from './ui';
 export const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: 'home', group: 'Operate' },
   { id: 'sdr', label: 'SDR', icon: 'radio', group: 'Operate' },
+  { id: 'repeaters', label: 'Repeaters', icon: 'book', group: 'Operate' },
   { id: 'meshtastic', label: 'Meshtastic', icon: 'mesh', group: 'Operate' },
   { id: 'meshcore', label: 'MeshCore', icon: 'layers', group: 'Operate' },
   { id: 'gps', label: 'GPS', icon: 'gps', group: 'Operate' },
@@ -214,6 +217,8 @@ export function App() {
     switch (route) {
       case 'sdr':
         return <SdrPage />;
+      case 'repeaters':
+        return <RepeatersPage />;
       case 'meshtastic':
         return <MeshtasticPage />;
       case 'meshcore':
@@ -293,6 +298,7 @@ export function App() {
           </header>
 
           <main className="content">{page}</main>
+          <PlayerBar />
         </div>
 
         <nav className="mobile-nav">

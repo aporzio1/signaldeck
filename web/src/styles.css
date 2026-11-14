@@ -325,3 +325,33 @@ input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius
   .topbar-title { font-size: 14px; }
   .sdr-freq { font-size: 32px; }
 }
+
+
+/* ---- footer player + repeater book (operate pages) ---- */
+.player-bar {
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: 14px; z-index: 29;
+  display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+  background: rgba(11, 16, 23, 0.92); border: 1px solid var(--line-2); border-radius: 999px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45); backdrop-filter: blur(10px); max-width: min(560px, 92vw);
+}
+.player-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); flex: none; }
+.player-dot.mock { background: var(--warn, #eab308); box-shadow: 0 0 10px rgba(234, 179, 8, 0.6); }
+.player-freq { font: 600 14px/1 var(--mono, ui-monospace, monospace); white-space: nowrap; }
+.player-dim { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.06em; }
+.player-volume { width: 84px; accent-color: var(--accent); }
+.player-stop { border: 1px solid var(--line-2); background: transparent; color: var(--dim); border-radius: 999px; padding: 4px 10px; font-size: 11.5px; cursor: pointer; }
+.player-stop:hover { color: var(--text, #e6edf3); border-color: var(--accent); }
+@media (max-width: 900px) { .player-bar { bottom: 64px; } }
+
+.loc-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+.loc-row .input { height: 30px; }
+.src-url { font-size: 12px; word-break: break-all; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; align-items: end; }
+.list-row { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line); }
+.list-row:last-child { border-bottom: none; }
+.rep-main { flex: 1; display: flex; align-items: center; gap: 12px; background: transparent; border: 0; color: inherit; cursor: pointer; text-align: left; padding: 2px 4px; min-width: 0; }
+.rep-main:hover .rep-freq { color: var(--accent); }
+.rep-freq { font: 600 14px/1.2 var(--mono, ui-monospace, monospace); white-space: nowrap; }
+.rep-name { color: var(--dim); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-del { border: 0; background: transparent; color: var(--dim); cursor: pointer; padding: 4px; display: inline-flex; }
+.row-del:hover { color: #f87171; }

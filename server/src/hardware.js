@@ -140,9 +140,14 @@ export async function detectRtl() {
   const raw = `${res.stdout}\n${res.stderr}`.trim();
   const serials = [...raw.matchAll(/SN:\s*([0-9A-Za-z]+)/g)].map((m) => m[1]);
   const found = /Found\s+(\d+)\s+device/i.exec(raw);
-  const count = found ? Number(found[1]) : serials.length;
+  const listed = /Using device|Generic RTL2832U|HackerGadgets/i.test(raw);
+  // rtl_test cannot claim the interface while our own rtl_tcp holds the tuner;
+  // an enumerated-but-busy stick is present, not missing.
+  const busy = listed && /usb_claim_interface error|currently there is only one possible use|device or resource busy/i.test(raw);
+  const count = busy ? 1 : found ? Number(found[1]) : serials.length;
   return {
-    available: res.ok && count > 0,
+    busy,
+    available: (res.ok && count > 0) || busy,
     count,
     devices: serials.map((serial, index) => ({ index, serial, label: `RTL-SDR #${index} (${serial})` })),
     raw: raw.split('\n').slice(0, 20).join('\n'),
