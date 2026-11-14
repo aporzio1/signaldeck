@@ -28,6 +28,15 @@ export const CMD = {
 
 const MOCK_RATE_CAP = 1200000;
 
+/** Best-listening demodulator for a frequency; the bands clients actually hunt. */
+export function inferDemod(hz) {
+  if (!Number.isFinite(hz)) return 'nfm';
+  if (hz >= 88e6 && hz <= 108e6) return 'wfm'; // broadcast FM
+  if (hz >= 118e6 && hz <= 137e6) return 'am'; // air band
+  if (hz < 30e6) return 'am';                  // MW/SW/ham below 30 MHz
+  return 'nfm';                                // VHF/UHF: everything talks narrow FM
+}
+
 export class SdrService extends EventEmitter {
   constructor() {
     super();
@@ -379,8 +388,9 @@ export class SdrService extends EventEmitter {
       this.send(CMD.SET_OFFSET_TUNING, this.state.offsetTuning ? 1 : 0);
       settings.sdr.offsetTuning = this.state.offsetTuning;
     }
-    if (demod != null) {
-      this.state.demod = String(demod);
+    const wantedDemod = demod ?? inferDemod(this.state.frequency);
+    if (wantedDemod != null) {
+      this.state.demod = String(wantedDemod);
       settings.sdr.demod = this.state.demod;
       this.audioDemod?.configure(this.state.sampleRate, this.state.demod);
       this.emit('audio-config', { rate: this.audioDemod.outRate, demod: this.state.demod });
