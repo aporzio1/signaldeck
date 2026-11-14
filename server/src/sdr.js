@@ -348,7 +348,7 @@ export class SdrService extends EventEmitter {
         this.send(CMD.SET_SAMPLE_RATE, rate);
         this.iqPacer?.setRate(rate);
         this.audioDemod?.configure(rate, this.state.demod);
-        this.emit('audio-config', { rate: this.audioDemod.outRate, demod: this.state.demod });
+        if (this.audioDemod) this.emit('audio-config', { rate: this.audioDemod.outRate, demod: this.state.demod });
       }
       this.state.sampleRate = Math.min(rate, this.state.source === 'mock' ? MOCK_RATE_CAP : rate);
       settings.sdr.sampleRate = rate;
@@ -393,7 +393,7 @@ export class SdrService extends EventEmitter {
       this.state.demod = String(wantedDemod);
       settings.sdr.demod = this.state.demod;
       this.audioDemod?.configure(this.state.sampleRate, this.state.demod);
-      this.emit('audio-config', { rate: this.audioDemod.outRate, demod: this.state.demod });
+      if (this.audioDemod) this.emit('audio-config', { rate: this.audioDemod.outRate, demod: this.state.demod });
     }
     saveSettings().catch(() => {});
     this.emit('state', this.getState());
