@@ -19,6 +19,7 @@ export class AudioDemod {
     this.gateLevel = 0;
     this.noiseFloor = 0.05;
     this.framePeak = 0;
+    this.frameSum = 0;
     this.gateAt = 0;
     this.onGate = null;
     this.reset();
@@ -46,7 +47,7 @@ export class AudioDemod {
 
   gateThreshold() {
     if (this.squelch > 0) return this.squelch;
-    return Math.min(0.35, this.noiseFloor * 2.2 + 0.015);
+    return Math.min(0.8, this.noiseFloor * 1.6 + 0.02);
   }
 
   gate() {
@@ -76,6 +77,7 @@ export class AudioDemod {
     this.outCount = 0;
     this.count = 0;
     this.framePeak = 0;
+    this.frameSum = 0;
   }
 
   /** iqBuffer: interleaved unsigned 8-bit I/Q pairs (post-framing). */
@@ -90,6 +92,12 @@ export class AudioDemod {
         const diffRe = re * this.prevRe + im * this.prevIm;
         const diffIm = im * this.prevRe - re * this.prevIm;
         sample = Math.atan2(diffIm, diffRe) * this.fmScale;
+        // The gate compares against a 0..1 full-scale threshold, so the
+        // deviator output must live on that same scale: wideband noise
+        // des by up to ~100x full deviation, and pre-clamp levels made
+        // every threshold winnable-free (gate never closed).
+        if (sample > 1) sample = 1;
+        else if (sample < -1) sample = -1;
       } else {
         sample = (Math.hypot(re, im) / 127.5) * 0.9;
         this.dcAvg += (sample - this.dcAvg) * 0.0005;
@@ -102,12 +110,12 @@ export class AudioDemod {
       this.lp[this.lpIndex] = sample;
       this.lpSum += sample - old;
       this.lpIndex = (this.lpIndex + 1) % this.decim;
-      const magnitude = sample < 0 ? -sample : sample;
-      if (magnitude > this.framePeak) this.framePeak = magnitude;
       this.count += 1;
       if (this.count === this.decim) {
         this.count = 0;
         const value = Math.max(-1, Math.min(1, this.lpSum / this.decim));
+        const magnitude = value < 0 ? -value : value;
+        this.frameSum += magnitude;
         this.out[this.outCount++] = Math.round(value * 32767);
         if (this.outCount === OUT_SAMPLES) {
           this.flush();
@@ -122,7 +130,8 @@ export class AudioDemod {
       // rides the noise floor with hysteresis so it holds open through speech
       // and shuts on hiss; a manual threshold just wins.
       const peak = this.framePeak;
-      this.framePeak = 0;
+      this.framePeak = this.frameSum / OUT_SAMPLES;
+      this.frameSum = 0;
       this.gateLevel = 0.2 * peak + 0.8 * this.gateLevel;
       if (this.gateLevel < this.noiseFloor) this.noiseFloor = 0.95 * this.noiseFloor + 0.05 * this.gateLevel;
       else this.noiseFloor += (this.gateLevel - this.noiseFloor) * 0.02;
@@ -140,5 +149,6 @@ export class AudioDemod {
   drop() {
     this.outCount = 0;
     this.framePeak = 0;
+    this.frameSum = 0;
   }
 }
