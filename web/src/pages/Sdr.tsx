@@ -643,7 +643,7 @@ export function SdrPage() {
                 label="Squelch"
                 value={state.squelch ?? -70}
                 min={-105}
-                max={-6}
+                max={-15}
                 step={1}
                 onChange={(value) => {
                   apply({ squelch: value });
