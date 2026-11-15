@@ -621,6 +621,13 @@ export function SdrPage() {
           <Card title="Demodulation" subtitle="Audio is decoded in your browser from raw IQ">
             <div className="stack">
               <div className="band-chips">
+                <button
+                  className="chip"
+                  onClick={() => apply({}, true)}
+                  title="Let the console pick the demodulator for the current band"
+                >
+                  Auto
+                </button>
                 {DEMODS.map((mode) => (
                   <button
                     key={mode.id}
@@ -638,9 +645,15 @@ export function SdrPage() {
                 min={-105}
                 max={-20}
                 step={1}
-                onChange={(value) => apply({ squelch: value })}
+                onChange={(value) => {
+                  apply({ squelch: value });
+                  // Mirror to the shared server gate so phone and console mute together.
+                  // At the floor of the slider the Pi tracks the noise automatically.
+                  const linear = value <= -104 ? 0 : Math.pow(10, value / 20);
+                  api.post('/sdr/squelch', { value: linear }).catch(() => {});
+                }}
                 format={(value) => `${value} dB`}
-                hint="Signals below this level are muted. Lower it to hear weaker stations."
+                hint="Signals below this level are muted on every listener. Lower it to hear weaker stations; at the floor the Pi tracks the noise itself."
               />
               <Slider
                 label="Volume"
